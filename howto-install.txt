@@ -1,0 +1,84 @@
+                            Installing membalance
+                            *********************
+
+Membalance is composed of two parts: "membalance" daemon that should be
+installed and run in Dom0, and "memprobe" daemon that should be installed
+and run in every managed DomU.
+
+There is currently no distro-specific membalance packages available to be
+installed with utilities like apt or yum. Instead, membalance/memprobe have
+to be installed by manually executing "make install" from build directory.
+
+Furthermore, daemon scripts are available and have been tested only for
+Ubuntu.
+
+Daemon scripts for OpenSUSE are included with the source, but currently have
+not been tested yet.
+
+
+PREREQUISITES for Dom0
+======================
+
+There are no prerequisites for Dom0 other than having (obviously) Xen
+installed. All required dependencies are provided by Xen installation.
+
+Xen XL toolkit is required (which is the default for current Xen
+distributions).
+
+
+INSTALLATION for Dom0
+=====================
+
+On the build system, execute build of "membalance" as described in build howto.
+Transfer pre-built directory src/membalance with all its subdirectories to Dom0
+using ftp, NFS, rsync or any other transfer channel.
+
+Within target directory execute as root:
+
+    # make install
+    # service membalance start
+    
+Configure /etc/membalance.conf (often just default settings would do fine, at
+least initially) and execute the command to make membalanced daemon to re-read
+the settings from /etc/membalance.conf:
+
+    # service membalance reload
+    
+After configuring membalance settings in managed DomU's configuration files
+and installing memprobe in managed DomU's (as described below) restart those
+domains.
+
+A way to begin managing a domain without restarting it will be provided with
+a subsequent version of membalance.
+    
+To uninstall:    
+
+    # service membalance stop
+    # make uninstall
+
+
+PREREQUISITES for DomU
+======================
+
+Install the latest libxenstore package, e.g. libxenstore3.0.
+For example on Ubuntu:
+
+    sudo apt-get install libxenstore3.0
+  
+
+INSTALLATION for DomU
+=====================
+
+On the build system, execute build of "memprobe" as described in build howto.
+Transfer pre-built directory src/memprobe with all its subdirectories to DomU
+using ftp, NFS, rsync or any other transfer channel.
+
+Within target directory execute as root:
+
+    # make install
+    # service memprobe start
+    
+To uninstall:    
+
+    # service memprobe stop
+    # make uninstall

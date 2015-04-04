@@ -1,0 +1,62 @@
+                            Building membalance
+                            *******************
+
+PREREQUISITES:
+==============
+
+Development/build system requires the following packages to be installed:
+
+    libxen-dev
+    uuid-dev
+    
+For example, on Ubuntu execute:
+
+    sudo apt-get install libxen-dev uuid-dev
+    
+Also required is Xen header file "libxlutil.h" which currently is not included
+with libxen-dev. To obtain this file (if missing under /usr/include), download
+Xen source tree and point it by environment variable XEN, for example:
+
+    mkdir ~/gits/xen
+    cd ~/gits/xen
+    git clone git://xenbits.xen.org/xen.git
+    [optionally:]  git checkout stable-4.4  [or stable-4.5 etc.]
+    export XEN=~/gits/xen
+    
+If environment varaible XEN is left unspecified, makefile defaults its value
+to ~/gits/xen.
+
+
+BUILD:
+======
+
+From membalance root directory, execute:
+
+    ( cd src/membalance; make rebuild )
+    ( cd src/memprobe; make rebuild )
+
+The following options can be added to the make command:
+
+    DEBUG=1  Enables debug build
+    
+    DEVEL=1  Enables development-time code 
+    
+It might be possible for a build to fail with error message
+    
+    /usr/include/xenctrl.h: error: use of enum "xc_error_code" without previous declaration
+    
+This indicates an outdated file "xenctrl.h". If you see this error, try to
+update package libxen-dev. If you already have installed the latest version of
+the package available for your Linux distro installed and the fix to
+"xenctrl.h" still did not make into it, edit "/usr/include/xenctrl.h" manually.
+Move line
+
+    typedef enum xc_error_code xc_error_code;
+
+past 
+
+    enum xc_error_code {
+    ...
+    };
+
+Then re-run make.

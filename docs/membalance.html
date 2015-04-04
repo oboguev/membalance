@@ -1,0 +1,2839 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta content="text/html; charset=ISO-8859-1" http-equiv="content-type"><title>Membalance</title></head>
+<body>
+<div style="text-align: center; background-color: rgb(230, 230, 230);"><font size="+2"><span style="font-weight: bold;"><br>
+Membalance</span><br>
+<span style="font-weight: bold;"></span><font size="+1">A dynamic memory balancer for Xen virtual machines</font></font><br>
+<br>
+(version 0.1)<br><br>Sergey Oboguev<br>oboguev@yahoo.com<br>
+<br>
+<a href="https://github.com/oboguev/membalance">https://github.com/oboguev/membalance</a><br>
+<br>
+</div>
+<br>
+Membalance dynamically balances memory allocation between Xen virtual
+machines (domains) in response to varying memory demand (memory
+pressure) within guests.<br>
+<br>
+<div style="margin-left: 40px;">CONTENT:<br>
+<ul>
+<li><a href="#RATIONALE">RATIONALE</a></li>
+<li><a href="#USING">USING MEMBALANCE</a></li>
+<li><a href="#ALGORITHM">REBALANCING ALGORITHM</a></li>
+<li><a href="#XENAPI">DEFICIENCIES OF XEN API</a></li>
+<li><a href="#ROADMAP">FUTURE WORK / ROADMAP</a></li>
+<li><a href="#REFERENCES">REFERENCES</a></li>
+</ul>
+</div>
+<br>
+<hr><br>
+<a name="RATIONALE"></a>
+<div style="text-align: center;"><span style="font-weight: bold;">RATIONALE</span><br>
+</div>
+<br>
+One
+of the purposes of virtualization is to co-deploy virtual machines on
+the same physical host to
+improve the utilization of physical resources, such as CPU cycles,
+storage
+devices, IO bandwidth etc., by&nbsp;multiplexing these resources
+among
+the VMs, very much like a generation earlier their utilization was
+improved by
+a transition to multi-tasking and multi-user time-shared operating
+systems and multiplexing physical resources between users and
+concurrent processes.<br>
+<br>
+Like any computing entity reflecting human
+activity (and some of automated activity as well), virtual machines
+more often than not exhibit an uneven load
+pattern significantly varying over time. Production system are likely
+to exhibit load depending on time of the day, business cycles, schedule
+for generation of reports, unpredictable&nbsp; factors like
+interactive
+and market customer behavior etc. Development and test/staging systems
+and standby/failover instances may exhibit even more uneven load
+pattern.<br>
+<br>
+Hypervisors
+normally&nbsp;allow dynamic and adaptive reallocation of resources
+between the VMs to meet
+these fluctuating workload demands, including bursty&nbsp;and peak
+loads. This applies to reallocation of CPU cycles between the VMs,
+sharing of IO bandwidth and (possibly thinly provisioned) storage. A
+similar need also exists for dynamic reallocation of main memory
+between the VMs. Higher loads may require an increased amount of
+pseudo-physical memory available to a virtual machine. Insufficient
+memory is likely to result in increased paging rate and&nbsp;file
+system cache miss rate, due to insufficient cache size, leading to
+lower performance and the waste of IO bandwidth to re-read pages and
+file data from storage devices. Therefore it normally pays off to
+increase
+memory size of a virtual machine that has significant <span style="font-style: italic;">memory pressure</span>, at
+the cost of shrinking other machines with low current demand for main
+memory.<br>
+<br>
+Such
+an adjustment very much represents a carry-over of a concept of dynamic
+adjustment of process working (resident) sets into the era when a locus
+of&nbsp;&#8220;multiuserness&#8221; largely moved or extended from
+processes/jobs
+within an OS to
+VMs within a hypervisor.<br>
+<br>
+Broadly, there are two complementary approaches to dynamic partitioning
+of memory between the VMs.<br>
+<ul>
+<li>One is dynamically adjusting memory size of individual VMs,
+according to current memory demand of the VMs.<br>
+<br>
+This approach parallels dynamic adjustment of process working/resident
+set in a traditional OS.<br>
+</li>
+</ul>
+<ul>
+<li>The other approach is using Transcendent Memory.<br>
+<br>
+It
+allocates a region of hypervisor memory for VMs to use as an &#8220;extended
+memory&#8221; accessible only indirectly on a block basis (remember IBM PC,
+DOS and &#8220;extended memory&#8221; drivers?) and used as a shared area for page
+and file system caches. When a VM does not have sufficient main memory,
+it can use Transcendent Memory as an overflow area.<br>
+<br>
+There are two basic forms of Transcendent Memory: clean data pools and
+modified data pools.<br>
+<br>
+In
+a traditional OS, a memory is (broadly) divided between per-process
+working sets (or sometimes single global working set in operating
+systems that do not have a notion of per-process working sets, like
+e.g. Linux), Modified Page List and Free Page List maintained in a
+LRU-like order.<br>
+<br>
+When a page is evicted from a process working/resident set, it
+experiences the following transitions.<br>
+<br>
+An evicted page that has not been modified is put on the free list:
+&nbsp;</li>
+</ul>
+<div style="margin-left: 80px;">process working set
+-&gt; Free Page List<br>
+</div>
+<div style="margin-left: 40px;"><br>
+Pages
+on the Free List are considered to be available for grabbing and reuse
+in case memory is needed, since their content can be reconstructed by
+reading it again from a backing store (such as a paging or image file).<br>
+On
+the other hand, if page on the Free List is referenced by a process
+that needs it, it can be refaulted into that process&#8217; working set, at
+which point the page is removed from the Free List.<br>
+<br>
+An evicted
+page that has been modified by a process is put on the modified list
+first. If referenced by the process soon again, it can be re-faulted
+into that process&#8217; working set and removed from the Modified List. If a
+page on the Modified List stays&nbsp;unreferenced for some time
+(and
+thus not returned back to process working set) it may be flushed to a
+backing storage like a page file or original file (if originates from a
+memory-mapped file mapped as writable), at which point the page
+becomes&nbsp;&#8220;clean&#8221; and can be put on Free List:<br>
+<br>
+</div>
+<div style="margin-left: 80px;">process working set
+-&gt; Modified Page List -&gt; Free Page List<br>
+</div>
+<div style="margin-left: 40px;"><br>
+Transcendent Memory translates this traditional OS paradigm into the
+realm of hypervisors.<br>
+<br>
+TMEM clean pools represent an equivalent of Free List.<br>
+TMEM modified data pools represent an equivalent of Modified List.<br>
+<br>
+Guest
+operating systems are free to use TMEM pools for caching both virtual
+memory page and file cache pages, and in guest OS&#8217;es with integrated
+VM/FS cache this happens more or less automatically.<br>
+<br>
+Very much
+like with pages cached in a traditional OS&#8217;es Free List, TMEM is free
+to drop cached pages from TMEM clean pools at any time to reclaim
+memory when a hypervisor needs memory, since the content of these pages
+can be reconstructed by reading it from the backing store. Pages from
+modified-data pools are not dropped.<br>
+<br>
+Current TMEM design for Xen
+(and TMEM interface specification) fall somewhat short of their
+OS-level antecedents, by not defining a way for a dirty page to
+transition from modified-data TMEM pool to clean-data cache. Such a
+transition would require TMEM manager to notify guest OS of
+hypervisor&#8217;s increasing need for memory, and its insistence that guest
+OS writes out pages kept in modified-data TMEM pool and transitions
+them to clean pages (held either inside the guest or in TMEM clean-data
+pool), ready to be reclaimed. Guest OS cannot make a decision that such
+a transition is needed on its own, since the need for it is steered by
+the knowledge available only to the hypervisor and by the policy
+managed by hypervisor &#8211; thus a transition can be requested only by the
+hypervisor. Yet&nbsp;TMEM currently does not define a
+guest/hypervisor
+interface to facilitate such a communication.<br>
+<br>
+Otherwise TMEM
+design parallels traditional OS memory split-up between process working
+sets, Modified Page List and Free Page List. </div>
+<br>
+Transcendent
+Memory is a viable technique of improving overall system performance.
+Beyond acting as a global cache aggregating pages from multiple VMs
+(clean-pool pages are retained and dropped in LRU-like fashion,
+optionally adjusted by per-VM <span style="font-style: italic;">share</span>
+weights and <span style="font-style: italic;">caps</span>),
+and thus providing more extra memory to those VMs that currently are in
+a heavier need of memory, it also offers less obvious modes
+of optimizations. Pages can be compressed and de-duplicated. Also TMEM
+is
+able to use the kinds of memory less suitable as regular main memory,
+for example memory blades built of&nbsp;slow cheap RAM (yet much
+faster
+than Flash memory) located in far NUMA nodes.<br>
+<br>
+Yet, Transcendent Memory is not suitable as a total replacement for
+dynamic adjustment of memory size of individual VMs.<br>
+<br>
+Indeed,
+if host system were to be configured to run undersized VMs (i.e.
+statically configured with memory size well below that VM peak memory
+utilization), and relying on TMEM pool to keep their &#8220;overflow pages&#8221;
+during the periods of elevated load, such a configuration would induce
+the following kinds of overhead:<br>
+<ul>
+<li>high rate for invocation intra-guest algorithm determining
+which page to evict</li>
+<li>copyout of evicted page to TMEM (hypercall + memcpy + list
+management)</li>
+<li>copyin of cached&nbsp; page from TMEM (hypercall + list
+management + memcpy)</li>
+<li>updates to virtual memory structures if the page represents
+an address space page (rather than FS cache page)</li>
+<li>updates to file system cache structures (for pages in FS
+cache)</li>
+<li>if
+TMEM does not define preswap pool, then premature writing out of dirty
+pages (to move them to the clean list, in the conditions of intra-guest
+main memory shortage)</li>
+<li>if TMEM does&nbsp;define preswap pool,
+then this raises an issue about its handling mentioned earlier (lack of
+guest notification)</li>
+<li>if
+domain experiences high need in mapped virtual memory (as opposed to FS
+cache), TMEM is not the most satisfactory solution since the access to
+TMEM pages is only indirect
+and they cannot be mapped directly into process address space, thus
+every reference to a missing page (held in TMEM) is liable to cause a
+page fault with all the overhead of page fault processing</li>
+</ul>
+If follows then that an optimal approach
+to dynamic memory partitioning would involve both basic approaches as
+complementary &#8211; dynamic adjustment of memory size of individual VMs <span style="font-style: italic;">coupled</span> with the
+use of Transcendent Memory.<br>
+<br>
+Generally,
+the size of VMs would be adjusted to represent longer-term envelope of
+their memory need, estimated on the basis of some indicators and
+predictive logics, and policy-balanced against the needs of other
+co-running VMs.<br>
+<br>
+Whereas Transcendent Memory would:<br>
+<ol>
+<li>Accommodate shorter-term overflows beyond this envelope
+(intra adjustment ticks).<br>
+<br>
+</li>
+<li>Dampen the errors in&nbsp;prediction/estimates of
+memory needs of individual VMs compared to their actual needs<br>
+</li>
+</ol>
+<div style="margin-left: 40px;">This is crucial, as
+behavior of real-world programs and systems does not fit analytic
+models.<br>
+All
+models and heuristics for estimation of VM &#8220;true working set&#8221; and
+prediction of its change over forecasted time interval have only
+limited predictive capacity, so mis-predictions are a given.<br>
+<br>
+Without
+Transient Memory, if a domain size is mis-predicated on
+lower-than-actual size, evicted page is totally lost and would have to
+be re-read.<br>
+<br>
+True, the amount allocated to Transient Memory pools
+can be divided on some basis among individual VMs and thus buttress the
+available memory in the domain. However misprediction means that in
+some domains this extra memory will be under-utilized, meaning in turn
+that needy domains will effectively receive less memory compared to a
+globally pooled configuration. If a memory pool is split among domains,
+the efficiency of its use is vulnerable to split ration misprediction.
+It it is held as a whole, with pool pages used on actual LRU-like
+basis, the need to predict and the impact of misprediction is
+eliminated.<br>
+</div>
+<br>
+The intent of Membalance is to (eventually)
+provide such an integrated memory balancing facility, along with other
+features such as pluggable policy module that can be customized
+according to site-specific needs. The roadmap and work plan for
+Membalance is outlined in FUTURE WORK/ROADMAP section below. The scope
+of initial version of Membalance (0.1, implemented so far) is to: <br>
+<ul>
+<li>Create
+a harness that hosts the rebalancing algorithm and provides it with
+runtime facilities to monitor hosted domains, manage their properties,
+resize them, respond to sysadmin management interface etc.<br>
+<br>
+</li>
+<li>Provide an initial version of rebalancing
+algorithm that would be sophisticated and practical enough to be usable
+as a foundation for production-grade memory rebalancing facility.<br>
+<br>
+</li>
+<li>Identify the shortcomings of Xen domain and memory
+management API that are an obstacle for any production-grade memory
+balancer.</li>
+</ul>
+There are two principal ways a memory balancer can collect the
+information on which to base its memory allocation decisions. <br>
+<ul>
+<li>One
+approach is application-agnostic and is based on monitoring low-level
+indicators of operating system or observed on OS/hypervisor boundary.<br>
+<br>
+</li>
+<li>Another approach,
+potentially more suitable for VM deployments running a single
+primary-importance application, is to rely on the data supplied by such
+an application about its memory needs. For example, a database engine
+is likely to&nbsp;be better positioned and more qualified to make a
+more accurate reasoning about its current and predicted memory needs
+than an application-agnostic probe monitoring the whole VM without the
+knowledge and understanding of application internals. </li>
+</ul>
+The
+initial version of Membalance uses the first approach, but later may
+explore the second option as well and provide an interface for the
+latter option (in practice, this would require to combine data from
+application-specific probes with data reported by application-agnostic
+probe, to cover kernel-managed resource usage that an application
+cannot easily account for).<br>
+<br>
+There
+is a number of approaches a
+balancer can measure memory pressure inside a domain. (See section
+REFERENCES below.) For example, VMware ESX estimates VM&#8217;s memory usage
+intensity by sampling page reference frequency. Every sampling interval
+a certain
+number of pages in a VM (in the order of 100 to 300
+pages)&nbsp;selected
+at random are marked by the hypervisor as inaccessible, and the
+hypervisor then counts the percentage of these pages that are
+referenced by the guest over the sampling interval. The advantage of
+this technique is that it does not need to rely on OS-specific probes
+and indicators. The obvious disadvantage is that although the
+sampling of this kind helps to assess the activity within the VM&#8217;s
+active working set (interpreted by ESX to infer the estimate of idle
+memory percentage and impose &#8220;idle memory tax&#8221;), it does not provide a
+reliable and reliably
+comparable indicator of expansion pressure.<br>
+<br>
+Membalance
+therefore opts to rely on OS-specific probes. Each VM subject to being
+dynamically resized by Membalance runs a probe that collects memory
+pressure data based on OS-specific indicators and reports this data to
+Membalance controller (daemon) running in Dom0. The controller relies
+on reported memory pressure data (comparison of reported memory
+pressure within the managed domains) plus policy settings to make a
+reasoning about the desired change in&nbsp;allocation of host
+memory
+between the domains.<br>
+<br>
+<div style="margin-left: 40px;">In this respect,
+participation by a domain in Membalance is semi-voluntary &#8211; as with any
+scheme relying on in-guest probes.<br>
+<br>
+An
+in-guest actor with guest-level administrator rights can suspend or
+terminate
+the execution of the probe. If Membalance does not receive probes
+reading, at first it temporarily stops managing memory allocation of
+this domain, except for the situations of significant memory need by
+the host, in which case the domain can be shrunk. If domain has not
+reported memory pressure data for some time, established by one of
+Memprobe policy settings, and the domain is sized above its quota, it
+is shrunk down to its quota.<br>
+<br>
+An in-guest actor with guest-level
+administrator rights can also fake probe data (or OS data the probe
+relies on, such as hard page fault rate), making the probe to falsely
+report high memory pressure inside the domain, and prompting Membalance
+to increase memory allocation to the domain. This reliance and
+limitation are inherent with any scheme relying on in-guest probes.
+This normally is not an issue when increased domain memory allocation
+results in increased billable utilization for higher memory usage, but
+may be an issue when resource use is not accounted or charged for.<br>
+</div>
+<br>
+A better indicator of memory pressure is the rate for eviction of old
+pages from virtual memory and file system caches, in order to replace
+them with missing data read from storage devices holding paging/swap
+space and data files. (When Transcendent Memory is used, this would
+also include reads from Transcendent Memory pools.) Most operating
+systems do not expose this kind of statistics in their stock
+uninstrumented kernels, however they usually do expose a close proxy:<br>
+<ul>
+<li>aggregate hard page fault rate + block read rate into file
+system cache<br><br>
+</li>
+<li>taken under additional filter requirement that a percentage
+of free memory inside guest must be low</li>
+<ul>
+<li>as there is no point expanding guest that has substantial
+free memory inside it</li>
+<li>when there is substantial memory available inside guest,
+even high IO and paging rates do not indicate high memory pressure</li>
+</ul>
+</ul>
+This is the construction of OS-level indicator that Membalance probe
+currently reports. <br>
+When percentage of free memory inside guest is below a threshold,
+Membalance probe reports aggregate hard page fault rate + block IO rate
+into file system cache.<br>
+When percentage of free memory inside guest is above a threshold,
+reported rate is 0.<br>
+<br>
+Note that the described indicator very much parallels the traditional
+indicator of
+process paging rate within a conventional OS, with the following
+translations:<br>
+<br>
+<center>
+<table style="text-align: left;" border="0" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="text-align: right;">OS</td>
+<td>&nbsp;&#8594;&nbsp;</td>
+<td>Hypervisor</td>
+</tr>
+<tr>
+<td style="text-align: right;">process</td>
+<td>&nbsp;&#8594;&nbsp;</td>
+<td>virtual machine</td>
+</tr>
+<tr><td style="text-align: right;">process working set</td><td>&nbsp;&#8594;&nbsp;</td><td>virtual machine memory allocation</td></tr><tr>
+<td style="text-align: right;">page faults</td>
+<td>&nbsp;&#8594;&nbsp;</td>
+<td>hard page faults +&nbsp;block read into file
+system cache </td>
+</tr>
+</tbody>
+</table>
+</center>
+<br>
+and with aggregate block/page IO statistics at VM/Hypervisor boundary
+taking the role of page fault statistics at process/OS boundary.<br>
+<br>There is a situation however, in which this simple indicator may be
+thrown off significantly and yield false reading of high memory
+pressure. If a VM performs the scan of large data set (e.g. full-disk
+search) using cached IO primitives, i.e. accessing data that it does
+not really want or intend to cache, but indicating caching intent
+through the use of cached IO access, the probe will likely observe very high
+read rate into file system cache, and since the
+application&nbsp;misuses cached IO primitives for its data scan, data
+scanned by the application will fill guest file system cache, resulting
+in low guest free memory. This will create a combination of the
+conditions that will cause the indicator to falsely report high memory
+pressure within a domain. A proper way to address this situation is to
+avoid it in the first place by application using O_DIRECT and/or
+posix_fadvise(POSIX_FADV_DONTNEED) on Linux and
+FILE_FLAG_NO_BUFFERING&nbsp;on Windows. Still it may be possible that a
+VM is processing a data set with a stock application developed without
+handling large data sets in mind, e.g. running <span style="font-style: italic;">grep</span>
+on a multi-gigabyte file set. The indicator will then report a false
+reading of high memory pressure. An indicator with more complex
+construction would be able to discern this situation by&nbsp;looking at
+cache use pattern (such as perhaps excluding from its report pages that
+are evicted before ever being re-referenced), but the implementation of
+such a refined indicator would be invasive for guest OS.<br><br>With
+Linux probe, there is currently also another issue. IO statistics in
+stock Linux kernel does not disaggregate cached and non-cached reads
+(i.e. block reads performed on files opened with O_DIRECT and without
+O_DIRECT),&nbsp;so an application such as database engine performing
+non-cached reads may cause the indicator to falsely report high memory
+pressure. The likelihood of this is reduced by free-memory percentage
+filter condition, which mitigates the problem, however in the longer
+run it would be desirable to include Linux kernel patch that accounts
+for page-in operations due to O_DIRECT files, and thus allows to
+exclude those operations from the total statistics, leaving only cached
+reads and page faults.<br><br>A&nbsp;construction
+of Membalance algorithm for reallocating memory between the domains is
+described below in section REBALANCING ALGORITHM.<br>
+<br>
+<hr>
+<a name="USING"></a><br>
+<div style="text-align: center;"><span style="font-weight: bold;">USING MEMBALANCE</span><br>
+</div>
+<br>
+Membalance build process is described in <span style="font-style: italic;">howto-build.txt</span>.<br>
+Installation procedure is described in <span style="font-style: italic;">howto-install.txt</span>.<br>
+<br>
+Virtual
+machines running on a particular Xen instance can be designated as to
+be managed (automatically sized) by Membalance, or to be left alone and
+not subject to automatic memory allocation adjustment by Membalance.
+They are termed, correspondingly, as <span style="font-style: italic;">managed</span> and <span style="font-style: italic;">unmanaged</span> virtual
+machines.<br>
+<br>
+For a machine to be designated as managed, Membalance-related settings
+need to be added to its Xen domain configuration file.<br>
+<br>
+Overall Membalance setup process is as follows:<br>
+<ul>
+<li>A memory pressure probe daemon (<span style="font-style: italic;">memprobe</span>) needs to
+be installed into every virtual machine to be managed (automatically
+resized) by Membalance.<br>
+<span style="font-style: italic;">Memprobe</span>
+does not require a configuration.<br>
+<br>
+</li>
+<li>A master&nbsp;Membalance daemon needs to be installed in Dom0.</li>
+</ul>
+<ul>
+<li>After installing&nbsp;Membalance, system administator needs to
+configure&nbsp;Membalance by specifiying its control parameters in two locations:<br>
+<br>
+</li>
+<ul>
+<li>In Xen domain configuration file for every domain that is
+to be managed (automatically&nbsp;sized) by membalace.<br>
+<br>
+</li>
+<li>In system-wide&nbsp;Membalance configuration file <span style="font-style: italic;">/etc/membalance.conf</span>.<br>
+This file contains settings for&nbsp;Membalance daemon.<br>
+It also allows to specify default values for&nbsp;Membalance parameters in
+domain configuration files.</li>
+</ul>
+</ul>
+<ul>
+</ul>
+When&nbsp;Membalance is started, it scans all running virtual machines to
+determine if they should be managed. Afterwards, when a new virtual
+machine is started,&nbsp;Membalance daemon notices it and begins similarly
+examining whether it should be managed by&nbsp;Membalance.<br>
+<br>
+While virtual machine is being examined, it is in the state termed <span style="font-style: italic;">pending</span>.<br>
+<br>
+Possible outcomes of the pending state are:<br>
+<ul>
+<li>Membalance daemon detects that machine is to be managed,
+and its configuration is valid, and consistent, and begins managing it.<br>
+The VM is said to transition to managed state.<br>
+<br>
+</li>
+<li>Membalance
+daemon detects that machine is not to be managed (i.e. has no&nbsp;Membalance settings in its Xen domain configuration file).<br>
+The VM is said to transition to unmanaged state.<br>
+<br>
+</li>
+<li>Membalance
+daemon detects that machine has&nbsp;Membalance-related settings in its
+configuration file, but these settings are incomplete or inconsistent.<br>
+A diagnostic message is issued, and the VM istransitioned to unmanaged
+state.</li>
+</ul>
+While VM is running, it is possible for it to transition from the
+managed to unmanaged state in the following events:<br>
+<ul>
+<li>Domain settings are updated (e.g. by changing defaults in <span style="font-style: italic;">/etc/membalance.conf</span>)
+and new domain settings become incomplete or inconsistent.<br>
+<br>
+</li>
+<li>Hard unexpected error inside&nbsp;Membalance or Xen.</li>
+</ul>
+It
+is also possible to instruct&nbsp;Membalance to re-examine a previously
+unmanaged
+domain, and to start managing it&nbsp;assuming the settings for the
+domain are valid.<br>
+<br>
+<div style="text-align: center;"><span style="font-style: italic;">Domain state transition diagram:</span><br>
+</div>
+<div style="text-align: center;"><img alt="Domain state transition diagram" src="diag-domain-states.gif"><br>
+</div>
+<br>
+The following membalane-related settings can be specified in a domain
+configuration file:<br>
+<br>
+<table style="text-align: left; margin-left: 40px;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">Parameter
+name</td>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">Explanation</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_min<br>
+</td>
+<td>Minimum size that domain can be shrunk to in the event
+of memory shortage.<br>
+<br>
+Low-data-rate domains are likely to be sized between <span style="font-style: italic;">dmem_min</span> and <span style="font-style: italic;">dmem_quota</span>.<br>
+<br>
+This setting can be though of as a practical domain size for very
+low-rate domains in the event of a memory-constrained system.<br>
+</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_quota</td>
+<td>Memory quota for a domain<br>
+<br>
+Quota setting approximates domain size on a memory-constrained system
+in the event a domain keeps creating data read-in load.<br>
+<br>
+This is a practical domain size limit for low- or mid-rate domains.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_max</td>
+<td>Maximum size a domain can be expanded to.<br>
+<br>
+This approximates domain size on a memory-abundant system in the event
+a domain keeps creating data read-in load.<br>
+<br>
+This is a practical domain size limit for high-rate domains.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_incr</td>
+<td rowspan="4">Membalance can automatically vary a
+domain&#8217;s memory size in range <span style="font-style: italic;">dmem_min</span>
+to <span style="font-style: italic;">dmem_max</span>.<br>
+<br>
+The values of <span style="font-style: italic;">dmem_quota</span>,
+<span style="font-style: italic;">rate_high</span>,&nbsp;<span style="font-style: italic;">rate_low</span>,&nbsp;<span style="font-style: italic;">dmem_incr</span>
+and&nbsp;<span style="font-style: italic;">dmem_decr</span>
+control this automatic adjustment of domain memory size.<br>
+<br>
+Domain has a greater claim to memory if its data read-in rate (i.e.
+virtual memory hard paging rate plus file system page cache block
+read-in rate) exceeds&nbsp;<span style="font-style: italic;">rate_high</span>,
+the smallest claim if its rate is below&nbsp;<span style="font-style: italic;">rate_low</span>, and
+intermediate claim if its rate is in between&nbsp;<span style="font-style: italic;">rate_low</span>
+and&nbsp;<span style="font-style: italic;">rate_high</span>.
+<br>
+<br>
+The strength of the claim also depends on the current size of a domain,
+most importantly its relationship to dmem_quota.<br>
+<br>
+Slightly simplifying, the strength of domain&#8217;s claim to memory is
+definied by its classification within the following categories:<br>
+<br>
+<div style="margin-left: 40px;">
+<table style="text-align: left;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">domain<br>
+size</td>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">domain<br>
+rate</td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;= <span style="font-style: italic;">dmem_quota</span></td>
+<td style="text-align: center;">&gt;= <span style="font-style: italic;">rate_high</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;= <span style="font-style: italic;">dmem_quota</span></td>
+<td style="text-align: center;"><span style="font-style: italic;">rate_low</span>
+... <span style="font-style: italic;">rate_high</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt; <span style="font-style: italic;">dmem_quota</span></td>
+<td style="text-align: center;">&gt;= <span style="font-style: italic;">rate_high</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt; <span style="font-style: italic;">dmem_quota</span></td>
+<td style="text-align: center;"><span style="font-style: italic;">rate_low</span>
+... <span style="font-style: italic;">rate_high</span></td>
+</tr>
+<tr>
+<td style="text-align: center;"><span style="font-style: italic;">(any)</span></td>
+<td style="text-align: center;">&lt;= <span style="font-style: italic;">rate_low</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+<br>
+<div style="margin-left: 40px;"><small>(More
+rigorous explanation is given </small><small>below </small><small>in
+</small><small>section </small><small>REBALANCING
+ALGORITHM,<br>
+see the definition of memory pressure functions there.)</small><br>
+</div>
+<br>
+Domains in higher tiers have stronger claim to memory.<br>
+Within a tier, domains with higher rate have a stronger claim to memory.<br>
+<br>
+Every <span style="font-style: italic;">interval</span>
+seconds,&nbsp;Membalance performs an adjustment in the sizes of managed
+domains.<br>
+<br>
+If
+domain rate and size justify its expansion,&nbsp;Membalance will try to
+expand the the domain at the cost of available free memory, or if it is
+exhausted then at the cost of shrinking down domains with weaker claim
+to memory. Within a single <span style="font-style: italic;">interval</span>,&nbsp;Membalance will try to expand domain that needs to grow by <span style="font-style: italic;">dmem_incr</span> percent
+of its current size.<br>
+<br>
+If a domain is to be trimmed down in size,&nbsp;Membalance will normally try
+to limit trim amount to at most <span style="font-style: italic;">dmem_decr</span>
+percent of its current size within a single interval. However in the
+event of dire free memory shortage and pressing needs by other domains
+with stronger memory claim,&nbsp;Membalance can trim domains by more
+than&nbsp;<span style="font-style: italic;">dmem_decr</span>,
+even all
+way down to&nbsp;<span style="font-style: italic;">dmem_min</span>.<br>
+<br>
+Defaults values (unless overriden&nbsp;<span style="font-style: italic;"></span>on system-wide
+basis in <span style="font-style: italic;">membalance.conf</span>):<br>
+<br>
+<div style="margin-left: 40px;">rate_high = 200
+kb/sec<br>
+dmem_incr = 6%&nbsp; (valid range: 0.5 - 30%)<br>
+<br>
+rate_low = 0 kb/sec<br>
+dmem_decr = 4%&nbsp; (valid range: 0.5 - 10%) <br>
+</div>
+<br>
+It is recommended to leave&nbsp;<span style="font-style: italic;">dmem_incr</span>
+and&nbsp;<span style="font-style: italic;">dmem_decr</span>
+fairly small so as to prevent excessive&nbsp;Membalance over-adjustment, but
+still substantial. Normally default values are adequate.<br>
+<br>
+Generally with default&nbsp;<span style="font-style: italic;">interval</span>
+value of 5 seconds, reasonable value for&nbsp;<span style="font-style: italic;">dmem_incr</span> ought not
+exceed 10%. It is also reasonable to keep the value for&nbsp;<span style="font-style: italic;">dmem_decr</span> somewhat
+below that of&nbsp;<span style="font-style: italic;">dmem_incr</span>,
+so domains would inflate fast when they need memory but deflate slower.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_decr</td>
+<td></td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_high</td>
+<td></td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_low</td>
+<td></td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_zero</td>
+<td>If guest reported data read-in rate is
+&lt;=&nbsp;<span style="font-style: italic;">rate_zero</span>,
+the rate is considered to be zero regardless of the value reported by
+the guest.<br>
+This value represents a limen of&nbsp;Membalance sensitivity, and rate
+values below it are considered to have no significance.<br>
+<br>
+Default is 30 kb/s unless overriden on system-wide basis in <span style="font-style: italic;">membalance.conf</span>.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_guest_free_threshold</td>
+<td>If guest system has more than&nbsp;<span style="font-style: italic;">guest_free_threshold</span>
+percent of free guest system memory, its data read-in rate is
+considered to be zero regardless of the reported rate value.<br>
+<br>
+Default is 15% unless overriden on system-wide basis in <span style="font-style: italic;">membalance.conf</span>.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_startup_time</td>
+<td>Estimated threshold on domain guest OS startup time.<br>
+<br>
+If domain uptime is less than&nbsp;<span style="font-style: italic;">startup_time</span> and
+domain did not start to report rate data yet, it may be given a benefit
+of the doubt that it did not have a good-faith chance to start <span style="font-style: italic;">memprobe</span> daemon yet
+and accorded a somewhat more lenient treatment in certain memory
+shortage situations compared to older non-reporting domains.<br>
+<br>
+Default is 300 seconds unless overriden on system-wide basis in <span style="font-style: italic;">membalance.conf</span>.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_trim_unresponsive</td>
+<td>Membalance will trim domain memory allocation down
+to&nbsp;<span style="font-style: italic;">dmem_quota</span>
+if a domain has not been reporting its data read-in rate data (e.g. <span style="font-style: italic;">memprobe</span> daemon
+stopped running in the guest) for&nbsp;<span style="font-style: italic;">trim_unresponsive</span>
+seconds, while domain has been staying runnable over this time, and
+domain size is over&nbsp;<span style="font-style: italic;">dmem_quota</span>.<br>
+<br>
+Default is 200 seconds unless overriden on system-wide basis in <span style="font-style: italic;">membalance.conf</span>.<br>
+<br>
+If set to 0, no trimming of non-reporting domain is performed.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_trim_unmanaged</td>
+<td>Membalance will trim domain memory allocation down
+to&nbsp;<span style="font-style: italic;">dmem_quota</span>
+when a domain is transitioning from managed to unmanaged state, in case
+its size is above&nbsp;<span style="font-style: italic;">dmem_quota</span>.<br>
+<br>
+Possible values: <span style="font-style: italic;">yes</span>/<span style="font-style: italic;">true</span> or <span style="font-style: italic;">no</span>/<span style="font-style: italic;">false</span>.<br>
+<br>
+Default is <span style="font-style: italic;">yes</span>
+unless overriden on system-wide basis in <span style="font-style: italic;">membalance.conf</span>.<br>
+</td>
+</tr>
+</tbody>
+</table>
+<br>
+The value for a domain parameter can be set in its Xen configuration
+file, or defaulted to system-wide default value configured in <span style="font-style: italic;">/etc/membalance.conf</span>,
+or defaulted to a hardwired&nbsp;Membalance default:<br>
+<br>
+<table style="text-align: left; margin-left: 40px;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">Parameter
+name in<br>
+Xen domain config file</td>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">Parameter
+name in<br>
+/etc/membalance.conf</td>
+<td style="background-color: rgb(204, 204, 204); text-align: center;">Hardwired<br>
+default</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_min<br>
+</td>
+<td>(none)</td>
+<td style="text-align: right;">(none)</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_quota</td>
+<td>(none)</td>
+<td style="text-align: right;">(none)</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_max</td>
+<td>(none)</td>
+<td style="text-align: right;">(none)</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_incr</td>
+<td>dmem_incr</td>
+<td style="text-align: right;">6%</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_dmem_decr</td>
+<td>dmem_decr</td>
+<td style="text-align: right;">4%</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_high</td>
+<td>rate_high</td>
+<td style="white-space: nowrap; text-align: right;">200
+kb/s</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_low</td>
+<td>rate_low</td>
+<td style="text-align: right;">0 kb/s</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_rate_zero</td>
+<td>rate_zero</td>
+<td style="text-align: right;">30 kb/s</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_guest_free_threshold</td>
+<td>guest_free_threshold</td>
+<td style="text-align: right;">15%</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_startup_time</td>
+<td>startup_time</td>
+<td style="text-align: right;">300 sec</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_trim_unresponsive</td>
+<td>trim_unresponsive</td>
+<td style="text-align: right;">200 sec</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">membalance_trim_unmanaged</td>
+<td>trim_unmanaged</td>
+<td style="text-align: right;">yes</td>
+</tr>
+</tbody>
+</table>
+<br>
+On a large installation managing many domains a sound policy would
+be to define&nbsp;Membalance settings for a given category of domains in a
+separate file and use Python import statement to include this file into
+a particular domain&#8217;s config file, overriding the settings in the
+domain config file only when necessary. This&nbsp;Membalance definition file
+may in turn derive from a higher-level file and this way a hierarchical
+inheritance of&nbsp;Membalance settings is possible.<br>
+<br>
+If <span style="font-style: italic;">membalace_dmem_max</span>
+is not specified in a domain configuration file, it is defaulted to the
+setting of <span style="font-style: italic;">maxmem</span>
+(and if <span style="font-style: italic;">maxmem</span>
+is not specified, then to <span style="font-style: italic;">memory</span>).<br>
+<br>
+If <span style="font-style: italic;">membalace_dmem_quota</span>
+is not specified in a domain configuration file, it is defaulted to the
+setting of&nbsp;<span style="font-style: italic;"></span><span style="font-style: italic;">memory</span>.<br>
+<br>
+If <span style="font-style: italic;">membalace_dmem_min</span>
+is not specified in a domain configuration file, it is defaulted to the
+setting of&nbsp;<span style="font-style: italic;"></span><span style="font-style: italic;">memory</span>.<br>
+<br>
+The following validity conditions should hold, or&nbsp;Membalance would
+refuse to manage a domain with approproate diagnostic message:<br>
+<br>
+<div style="margin-left: 40px;"><span style="font-style: italic;">dmem_min</span>
+&nbsp;&lt;=&nbsp; <span style="font-style: italic;">dmem_quota</span>
+&nbsp;&lt;= &nbsp;<span style="font-style: italic;">dmem_max</span>
+&nbsp;&lt;= &nbsp;<span style="font-style: italic;">maxmem</span><br>
+<span style="font-style: italic;">dmem_min</span>
+&nbsp;&lt;&nbsp; <span style="font-style: italic;">dmem_max</span><br>
+<span style="font-style: italic;">rate_low</span>
+&nbsp;&lt;&nbsp; <span style="font-style: italic;">rate_high</span><br>
+</div>
+<br>
+A common sense should be exercised&nbsp;to avoid setting the value
+of <span style="font-style: italic;">maxmem</span>
+much higher than it realistically needs to be. High values of <span style="font-style: italic;">maxmem</span> come at a
+cost. Guest operating system typically preallocates a descriptor for
+every&nbsp;physical page (PFN) it manages, whether owned by the
+balloon driver or not. These structures (in Linux case, <span style="font-style: italic;">struct page</span>) occupy
+approximately 1-2% of physical memory being managed. Therefore, if <span style="font-style: italic;">maxmem</span> is
+arbitrarily set let us say 10 times higher than initial domain memory
+size, then 10-20% of domain&#8217;s initial size would be lost to these
+structures, with corresponding impact on guest&#8217;s available free memory
+at initial domain size. (Hopefully, hotplug memory interface would
+allow to deal with this issue better.) This is especially important to
+keep in mind when <span style="font-style: italic;">dmem_min</span>
+is less than initial <span style="font-style: italic;">memory</span>
+setting: if a domain is shrunk down to dmem_min, the share of page
+management structures in total memory allocated to a domain can do even
+higher. For instance, if <span style="font-style: italic;">dmem_min</span>
+is 3 times less than <span style="font-style: italic;">memory</span>,
+and maxmem is 10 times higher than <span style="font-style: italic;">memory</span>,
+than after shrinking the domain to <span style="font-style: italic;">dmem_min</span>,
+page management structures can start occupying 30-60% of total domain&#8217;s
+memory, severely reducing free memory available within a domain, with
+an impact on a domain&#8217;s guest OS stabillity. In particular, low values
+of <span style="font-style: italic;">dmem_min</span>
+(especially coupled with high value of <span style="font-style: italic;">maxmem</span>) increase
+the likelyhood of Out-Of-Memory (OOM) process crashes in Linux guests.<br>
+<br>
+Here is a sample Xen domain config file with&nbsp;Membalance settings in it:<br>
+<br>
+<div style="margin-left: 40px;"><code>name="ub64a"<br>
+builder="hvm"<br>
+<br>
+vcpus=2<br>
+acpi=1<br>
+apic=1<br>
+<br>
+memory="2048"<br>
+maxmem="49152"<br>
+<br>
+disk = [<br>
+&nbsp;&nbsp;&nbsp;
+'file:/xenvirt/vm/ub64a/disk.img,ioemu:hda,w',<br>
+&nbsp;&nbsp;&nbsp;
+'file:/xenvirt/iso/ubuntu-desktop-14.04-x64.iso,ioemu:hdc:cdrom,r',<br>
+]<br>
+<br>
+serial='pty'<br>
+usbdevice='mouse'<br>
+vif = [ 'type=ioemu, ip=192.168.122.211, mac=00:26:B9:48:74:da,
+bridge=virbr0' ]<br>
+<br>
+sdl=1<br>
+vnc=0<br>
+<br>
+vga="stdvga"<br>
+videoram=16<br>
+boot='c'<br>
+<br>
+</code><code>membalance_dmem_min='2 gb'<br>
+</code><code>membalance_dmem_quota='4 gb'<br>
+membalance_rate_high='1 mb/s'</code><br>
+</div>
+<br>
+Once a domain is configured for&nbsp;Membalance (and also appropriate
+settings are selected in file <span style="font-style: italic;">/etc/membalance.conf</span><span style="text-decoration: underline;"> </span>as
+described below), domain should be restarted to activate it as managed
+by&nbsp;Membalance. In a future versions of&nbsp;Membalance, it would be possible
+to activate domain as managed without having to restart it.<br>
+<br>
+File&nbsp;<span style="font-style: italic;">/etc/membalance.conf</span><span style="text-decoration: underline;"> </span>also
+defines several&nbsp;Membalance configuration settings that apply not to
+individual domains, but control&nbsp;Membalance operation as a whole:<br>
+<br>
+<table style="text-align: left; margin-left: 40px;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">interval</td>
+<td>Membalance daemon will perform automatic memory
+adjustment of managed domain sizes&nbsp;every <span style="font-style: italic;">interval</span> seconds.<br>
+<br>
+This settings is also communicated to <span style="font-style: italic;">memprobe</span> daemon
+instances running in guest domains and instructs them to take memory
+pressure reading every&nbsp;<span style="font-style: italic;">interval</span>
+seconds and reports their readings to&nbsp;Membalance&nbsp;daemon
+running in the hypervisor domain.<br>
+<br>
+Default: 5&nbsp;seconds.<br>
+Valid range: 2 - 30 seconds.<br>
+</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">host_reserved_hard</td>
+<td>Membalance will try to leave alone Xen host system
+memory in the amount specified by&nbsp;<span style="font-style: italic;">host_reserved_hard</span>.
+<br>
+<br>
+Membalance will not expand domains if there is less than&nbsp;<span style="font-style: italic;">host_reserved_hard memory</span>
+left, nor expand domains by an amount that would leave less
+than&nbsp;<span style="font-style: italic;">host_reserved_hard</span>
+available. In addition, if host system&#8217;s free memory drops
+below&nbsp;<span style="font-style: italic;">host_reserved_hard</span>,&nbsp;Membalance will try to shrink managed domains to recover enough memory
+to bring the amount of host system available memory back to&nbsp;<span style="font-style: italic;">host_reserved_hard</span>.<br>
+<br>
+This amount is in addition to (on top of) Xen free memory slack, which
+is by default calculated by Xen to be 15% of total physical memory
+available, unless is set otherwise. &nbsp;Use command<br>
+<div style="margin-left: 40px;">xenstore-read
+/local/domain/0/memory/freemem-slack<br>
+</div>
+to find current Xen memory slack (in KBs).<br>
+<br>
+Format: &lt;amount&gt;[optional-space][optional-unit]<br>
+<br>
+Examples:<br>
+<br>
+<div style="margin-left: 40px;">1024 &nbsp;
+&nbsp; &nbsp; &nbsp; <span style="font-style: italic;">&nbsp;
+&nbsp;(default unit is mb)</span><br>
+2000 mb<br>
+2000m<br>
+3G<br>
+3 GB<br>
+</div>
+<br>
+Default: 0<br>
+</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">host_reserved_soft</td>
+<td>Membalance will try to set the amount of host free
+memory defined by&nbsp;<span style="font-style: italic;">host_reserved_soft</span>
+aside for use only by domains in substantial need of memory.<br>
+<br>
+These are domains below their&nbsp;<span style="font-style: italic;">dmem_quota</span> and with
+rate &gt;&nbsp;<span style="font-style: italic;">rate_low</span>,
+or domains any size with rate &gt;=&nbsp;<span style="font-style: italic;">rate_high</span>.<br>
+<br>
+This amount is in addition to (on top of) Xen free memory
+slack,&nbsp; as described above.<br>
+<br>
+Format: &lt;amount&gt;[optional-space][optional-unit]<br>
+<br>
+Examples:<br>
+<br>
+<div style="margin-left: 40px;">1024 &nbsp;
+&nbsp; &nbsp; &nbsp; <span style="font-style: italic;">&nbsp;
+&nbsp;(default unit is mb)</span><br>
+2000 mb<br>
+2000m<br>
+3G<br>
+3 GB<br>
+</div>
+<br>
+Default is calculated as:<br>
+<br>
+<div style="margin-left: 40px;">host_reserved_hard +
+10% of (Xen physical memory - &nbsp;Xen free memory slack - Dom0
+minimal size)<br>
+</div>
+<br>
+When
+using&nbsp;Membalance, it may be a good practice to keep the size Xen free
+memory slack to a minimum (instead of its default size of 15% of
+physical memory), and instead reallocate most of slack memory to <span style="font-style: italic;">host_reserved_soft</span>
+area. Memory required for starting new virtual machines can be obtained
+on demand by <span style="font-style: italic;">membalancectl
+free-memory</span> command, as described below.
+</td>
+</tr>
+</tbody>
+</table>
+<div style="margin-left: 40px;"><br>
+</div>
+<br>
+Whenever a setting in <span style="font-style: italic;">membalance.conf</span>
+is changed, execute the following command to make the daemon to re-read
+the configuration file:<br>
+<br>
+<div style="margin-left: 40px;">#
+&nbsp;service&nbsp; membalance&nbsp; reload</div>
+<br>
+Operation of the daemon can be controlled with <span style="font-style: italic;">membalancectl</span>
+command. Its usage summary:<br>
+<br>
+<div style="margin-left: 40px;"><code>Usage:</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp;
+list&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+display domains and memory status</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp;
+pause&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+suspend automatic domain memory balancing</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--quiet]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+do not print pause level</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp;
+resume&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+resume automatic domain memory balancing</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--force]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+drop remaining
+pause level to zero</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--quiet]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+do not print
+remaining pause level</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp;
+free-memory&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+ensure sufficient amount of free memory</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+&lt;n&gt;[k|m|g]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+specify required
+amount explicitly</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+--config &lt;x.cfg&gt; use the amount requested by domain
+config file</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--above-slack]&nbsp; the amount is on top of Xen free memory slack</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--use-reserved-hard]&nbsp;&nbsp; draw on host_reserved_hard if
+necessary</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+[--must]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+terminate with
+failure status if could not ...</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+... allocate the full requested amount</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp; manage-domain
+&lt;id&gt;&nbsp;&nbsp; request to manage domain that
+was in an unmanaged state</code><br>
+<code>&nbsp;&nbsp;&nbsp; manage-domain
+--all&nbsp; request to manage all currently unmanaged domains</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp; log-level
+[n]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+set and/or show logging level</code><br>
+<code>&nbsp;&nbsp;&nbsp; log-sink
+[which]&nbsp;&nbsp;&nbsp;&nbsp; set logging sink
+to&nbsp;"syslog" or&nbsp;"logfile"</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+dump-debug&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+dump daemon internal state to /etc/membalance.conf</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+show-debug&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+dump daemon internal state to stdout</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp;
+--version&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+print version (membalanced 0.1)</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+--help&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+print this text</code><br>
+<code></code><br>
+<code>Common options:</code><br>
+<code></code><br>
+<code>&nbsp;&nbsp;&nbsp; --verbose,
+-v&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+verbose output</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+-vv&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+even more verbose output</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+-vvv&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+most verbose output</code><br>
+<code>&nbsp;&nbsp;&nbsp;
+--quiet&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+quiet operation</code><br>
+<code>&nbsp;&nbsp;&nbsp; --human,
+-h&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+display data in human-readable format</code><br>
+<code>&nbsp;&nbsp;&nbsp; --timeout
+&lt;sec&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+time to wait for ack from the daemon (default: 10)</code><br>
+</div>
+<br>
+To list managed domains, their current memory allocation, rate and
+other statistics, execute:<br>
+<br>
+<div style="margin-left: 40px;">#&nbsp;
+membalancectl&nbsp; list</div>
+<br>
+Should
+a system adminstartor (for whatever reason)&nbsp;want to perform a
+manual intervention, such as manual resizing of one of the managed
+domains, or perform other operation that may interfere with automatic
+memory control, a good practice is to temporarily suspend automatic
+memory rebalancing:<br>
+<br>
+<div style="margin-left: 40px;"># &nbsp;membalancectl
+&nbsp;pause<br>
+.... manual operation ...<br>
+# &nbsp;membalancectl &nbsp;resume</div>
+<br>
+In
+the future this will also be augumented by commands to dynamically
+change&nbsp;Membalance setting for a domain after its start-up, such as to
+dynamically change domain&#8217;s <span style="font-style: italic;">dmem_quota</span>
+or to enable/disable automatic memory adjustment for the domain etc.<br>
+<br>
+It
+may also be a good practice to reduce Xen free slack to a minumum, and
+put this memory reserve under&nbsp;Membalance management instead, keeping it
+under <span style="font-style: italic;">host_reserved_soft</span>
+(and
+thus making it available to domains in need of memory instead of being
+kept as a pure standby). To start a new domain then:<br>
+<br>
+<div style="margin-left: 40px;"># &nbsp;membalancectl
+&nbsp;pause<br>
+# &nbsp;membalance&nbsp; free-memory &nbsp;--config xyz.cfg<br>
+# &nbsp;xl &nbsp;create&nbsp; xyz.cfg<br>
+# &nbsp;membalancectl&nbsp; resume &nbsp;--quiet</div>
+<br>
+Membalance daemon can be configured to write log messages either to
+system log or to <span style="font-style: italic;">/var/log/membalanced.log</span>.<br>
+The following command line options can be added to
+/etc/init.d/membalance (after the <span style="font-style: italic;">--daemon</span>
+option):<br>
+<br>
+<div style="margin-left: 40px;"><code>--debug-level
+&lt;n&gt;&nbsp;&nbsp;&nbsp; set debug level<br>
+--log&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+instead of syslog, log to <span style="font-style: italic;">/var/log/membalanced.log</span><br>
+</code></div>
+<br>
+Logging can also be dynamically controlled with <span style="font-style: italic;">membalancectl</span>, for
+example<span style="font-style: italic;">:</span><br>
+<br>
+<div style="margin-left: 40px;"># &nbsp;membalancectl
+&nbsp;log-sink &nbsp;logfile<br>
+# &nbsp;membalancectl &nbsp;log-level &nbsp;10</div>
+<br>
+<hr>
+<a name="ALGORITHM"></a><br>
+<div style="text-align: center;"><span style="font-weight: bold;">REBALANCING ALGORITHM</span><br>
+</div>
+<br>
+Memory scheduling algorithm dynamically balances host memory allocation
+between participating virtual machines according to their current
+memory demand and according to the settings established by system
+administrator.<br>
+<br>
+In general, any dynamic resource allocation algorithm should rebalance
+resources taking into the account:<br>
+<ol>
+<li>Dynamically reported current&nbsp;and also projected
+need of a computing entity (virtual machine) in a given kind of
+a resource, and the impact a&nbsp;shortage in the resource would
+have on the performance and forward progress of the entity, and on the
+waste of other resources (for instance, if memory allocation to a VM is
+insufficient, it may cause&nbsp;high paging rate, or high data read
+rate due to insufficient cache size, leading to the waste in CPU and IO
+bandwidth resources required to process such paging or data read
+requests).<br>
+<br>
+</li>
+<li>Relative importance of a given entity compared to other
+similar entities.<br>
+<br>
+Some entities (VMs) are more important than others and may be assigned
+a greater <span style="font-style: italic;">weight</span>
+or <span style="font-style: italic;">share</span>,
+so their claim to the resource would have greater strength compared to
+the claim of less important VMs.<br>
+<br>
+When all VMs have the same assigned <span style="font-style: italic;">weight</span> or <span style="font-style: italic;">share</span>, the
+algorithm is geared towards overall peformance optimizaton of the
+executing mix. <br>
+<br>
+More often however, not all virtual machines are equal in imporance,
+and system administator would want, in the event of a resource
+shortage, to let less important virtual machnines suffer more heavily,
+in order to maintain a satisfactory performance of more important
+virtual machines. At the extreme, resource allocation is defined purely
+by assigned <span style="font-style: italic;">shares</span>,
+without taking into account actual current demand by the VMs in the
+resource &#8211; likely leading to resource allocation to high-<span style="font-style: italic;">weight</span> VMs even in
+the event they&nbsp;actually may not need this much of a resource
+currently, and the resource stays idle or little-used by those VMs or
+some of them, while lower-<span style="font-style: italic;">weight</span>
+VMs sufferes a severe shortage of the resource hampering their
+performance.<br>
+<br>
+</li>
+<li>Therefore, a system administrator should be able to assign
+a relative importance to <span style="font-style: italic;">share</span>-based
+allocation vs. overall performance-based allocation.<br>
+<br>
+The goal of maintaining best performance of high-importance machines
+and the goal of maintaining overall mix performance and resource
+utilization are contradictory, and an administrator should be able to
+strike a balance between the two &#8211; an adjustuble balance.<br>
+<br>
+Administrator shoud be provided with a control that would force high-<span style="font-style: italic;">share</span> VMs to
+release <span style="font-style: italic;">some</span>
+of the resource they hold &#8211; and thus being allocated less than their <span style="font-style: italic;">share</span> value &#8211; but
+only in the event they do not currently have heavy&nbsp;need in
+this resource <span style="font-style: italic;">and</span>
+some of lower-weight VMs do have such a need.</li>
+</ol>
+To summarize, an algorithm for resource allocation between computing
+entities should be driven by:<br>
+<ul>
+<li><span style="font-style: italic;">Share-</span>based
+requirements representing human-defined importance of entities.<br>
+<br>
+</li>
+<li>Actual (current/projected and dynamically shifting)
+resource demand by individual entities.<br>
+<br>
+</li>
+<li>An adjustuble control creating a hybrid aim of these two goals,
+i.e. balancing the importance of overall performance and overall host
+resource utilization efficiency vs. <span style="font-style: italic;">share</span>-prioritized
+allocation.</li>
+</ul>
+The initial version of Membalance algorithm, as implemented in
+Membalance version 0.1 and as described below, embodies these
+requirements only partially. A fuller implementation is to be provided
+by a subsequent version of Membalance. Current version of the algorithm:<br>
+<ul>
+<li>Responds to real-time memory demand by individual Xen
+domains and embodies few&nbsp;very basic demand projections.<br>
+<br>
+</li>
+<li>Has a form of share-based allocation represented by memory
+quotas (DMEM_QUOTA) assignable for Xen domains. Currently the value of
+quota is assigned by system administrator manually, is a fixed value,
+and represents an absolute allocation size rather than a share. In the
+future, it may be made dynamically adjustuble (within min-max&#8217;ed range)
+to move it closer to a traditional share-based allocation.<br>
+<br>
+</li>
+<li>The design of the algorithm tries to balance overall
+performance vs. granting some share-like guarantees to individual
+domains. The balancing control for the two categories
+of&nbsp;requirements however is not yet made explicit in a single
+adjustable parameter, and is rather embodied in several parameters and
+logics than binds them. Adding more integrated and simplified control
+is an area for future work.</li>
+</ul>
+We will now proceed to the description of memory rebalancing algorithm
+implemented by Membalance version 0.1.<br>
+<br>
+The algorithm reasons about current memory demand of individual Xen
+domains chiefly on the basis of&nbsp; domain&#8217;s data read-in rate
+(aggregate of hard page faults rate + file
+system cache block read-in rate, kb/sec) over current sampling
+interval, with moving averages computed as necessary. The assumption
+being that reads reflect insufficient size of&nbsp;page cache or
+file system cache in a&nbsp;guest. The intention (not implemented
+yet) is to exclude non-cached reads such as direct IO (O_DIRECT) from
+the statistics of data read-in rate for Membalance purpose. As a
+further heuristics, if guest OS has ample free memory size (e.g. over
+15% of total guest memory size), then its read rate is not considered
+as indicative of memory shortage. The scheme is vulnerable to
+mis-interpreting guests that perform large IO transfers using cached
+read functions without actual intention to cache and reuse the data.<br>
+<br>
+The algorithm is invoked every <span style="font-style: italic;">interval</span>
+seconds &#8211; but only if there is at least one currently managed domain.
+If there are no managed domains, the algorithm is not invoked. (Once
+there appear managed domains, tick count is incremented accordingly to
+refelect elapsed sleep time.)<br>
+<br>
+If automatic domain memory allocation is paused by system
+administrator, the algorithm is invoked only to collect data (stage 1
+as described below), but does not perform any adjustments (stages 2-4
+are not invoked).<br>
+<br>
+The algorithm tries to provide good memory-supply responsivness for
+domains that need to expand, while avoiding premature domain
+contraction and upsize-downsize thrashing. The algorithm&#8217;s motto is
+&#8220;expand fast, contract slow&#8221; (wherever possible at all). To this end:<br>
+<ul>
+<li>Algorithm allows domains to grow in a time of plenty and
+trims domains only when there is actual demand for memory. When there
+is no demand, domains are allowed to keep memory allocated to them. As
+long as available memory stays above HOST_RESERVED_SOFT, there is
+currently no proactive reclamation (albeit some forms of it can be
+introduced later).<br>
+<br>
+</li>
+<li>Algorithm reserves a part of host memory (defined by
+HOST_RESERVED_SOFT) for domains in a substantial need of memory,
+otherwise keeping it free and immediatelly available for expansion of a
+domain when it comes in a substantial need of extra memory.<br>
+<br>
+</li>
+<li>Algorithm employs SLOW_RATE moving average to track recent
+history of domain&#8217;s data&nbsp;read-in rate in order to avoid
+premature
+contraction of a domain just because it did not show memory demand for
+a tick or two.<br>
+<br>
+</li>
+<li>Maximum domain expansion amount at a normal interval (<span style="font-style: italic;">dmem_incr</span>) is
+larger by default than trimming amount (<span style="font-style: italic;">dmem_decr</span>), unless
+the memory is in very short supply, albeit the values are aqjustable by
+system administrator.<br>
+</li>
+</ul>
+The algorithm uses the following data items.<br>
+<br>
+Global dynamic values:<br>
+<br>
+<div style="margin-left: 40px;">
+<table style="text-align: left;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">HOST_FREE</td>
+<td>Current amount of host free memory.</td>
+</tr>
+</tbody>
+</table>
+<br>
+</div>
+Global settings:<br>
+<br>
+<div style="margin-left: 40px;">
+<table style="text-align: left; width: 100%;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">INTERVAL</td>
+<td>Interval between successive invocations of the
+algorithm.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">
+HOST_RESERVED_HARD</td>
+<td>Host memory to leave alone and never consume for
+allocation during domain size auto-adjustment by&nbsp;Membalance:<br>
+<br>
+<ol>
+<li>Membalance will not expand existing domains if such
+an expansion
+would leave HOST_FREE below HOST_RESERVED_HARD.<br>
+<br>
+</li>
+<li>If&nbsp;Membalance detects that HOST_FREE dropped below
+HOST_RESERVED_HARD (e.g. because a new virtual machine has been
+launched or a domain was expanded manually by the system
+administrator)&nbsp;Membalance will try to reclaim memory from domains
+managed by&nbsp;Membalance to bring HOST_FREE up to HOST_RESERVED_HARD
+again or as
+close to it as possible for&nbsp;Membalance
+</li>
+</ol>
+This amount is in addition to (on top of) Xen free memory slack.<br>
+</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">
+HOST_RESERVED_SOFT</td>
+<td>Host memory between HOST_RESERVED_SOFT and
+HOST_RESERVED_HARD is made available only for domains in significant
+need of memory:<br>
+<br>
+<ol>
+<li>Domains with DMEM_SIZE &lt; DMEM_QUOTA and RATE
+&gt; RATE_LOW<br>
+</li>
+<li>Domains any size with data&nbsp;read-in rate
+&gt;=
+RATE_HIGH</li>
+</ol>
+As follows:<br>
+<ol>
+<li>If HOST_FREE &lt;= HOST_RESERVED_SOFT, domain can
+only expand
+beyond DMEM_QUOTA when its data&nbsp;read-in RATE &gt;=
+RATE_HIGH.<br>
+<br>
+This is the only constraint HOST_RESERVED_SOFT imposes on domain
+expansion if domain size is below DMEM_QUOTA, domain still can expand
+up to DMEM_QUOTA if its RATE &gt; RATE_LOW, regardless of
+HOST_RESERVED_SOFT.<br>
+</li>
+<li>If HOST_FREE drops below (&lt;)
+HOST_RESERVED_SOFT,&nbsp;Membalance
+will try to shrink those domains that have rate &lt; RATE_HIGH and
+size above their DMEM_QUOTA down to but not below DMEM_QUOTA, and will
+also try to shrink domains sized below QUOTA and having RATE &lt;=
+RATE_LOW.</li>
+</ol>
+In other words, a domain can expand above DMEM_QUOTA at the expense of
+free memory only if its RATE &gt;= RATE_HIGH<span style="font-style: italic;">&nbsp;<span style="text-decoration: underline;">and</span></span>
+FREE &gt;
+FREE_RESERVED_SOFT.<br>
+<br>
+Note that if FREE memory drops down to FREE_RESERVED_SOFT, a domain can
+still expand at the expense of shrinking other domains (rather than
+consuming free memory), as explained below in the description of stage
+4.<br>
+<br>
+Also, if free memory drops down to FREE_RESERVED_SOFT, membalanced will
+initiate shrinking of domains, as explained in (2) above and in stage 3
+description below.<br>
+<br>
+As a cumulative outcome, it ensures that memory beyond
+HOST_RESERVED_SOFT (but constrained by HOST_RESERVED_HARD) will be
+allocated only to domains<br>
+<br>
+<div style="margin-left: 40px;">(a) within their
+DMEM_QUOTA once they needs
+it (RATE &gt; RATE_LOW) <br>
+</div>
+<br>
+and <br>
+<br>
+<div style="margin-left: 40px;">(b) domains beyond
+DMEM_QUOTA but only
+having RATE &gt;= RATE_HIGH<br>
+</div>
+<br>
+This amount is in addition to (on top of) Xen free memory slack.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<br>
+Per-domain dynamic values:<br>
+<br>
+<div style="margin-left: 40px;">
+<table style="text-align: left;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">
+DMEM_SIZE</td>
+<td>Currently allocated memory size</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">RATE</td>
+<td>Reported data&nbsp;read-in rate for the current
+cycle.<br>
+<br>
+Note that memory demand reporting by domains is not exactly
+synchronized between domains (synchronized only up to approximately
+INTERVAL seconds) and not synchronized with execution of memory
+balancing algorithm in membalanced daemon (also synchronized only up to
+approximately INTERVAL seconds), therefore when membalanced executes
+its next cycle, RATE value may have not been reported by a domain yet,
+or reported value may reflect RATE value reported on the basis of
+paging/file cache read partly before the previous adjustment and partly
+after it (if domain size adjustment has been performed during the
+previous algorithm tick).<br>
+<br>
+<span style="font-style: italic;">Therefore:</span><br>
+<br>
+If no value has been reported for the current tick, value reported in
+the previous cycle is re-used.<br>
+<br>
+For this reason values of DMEM_INCR and DMEM_DECR should be moderate,
+typically not bigger than 5% and certainly not over 10%, to prevent
+rapid swings and overreaction of&nbsp;Membalance mechanism based on
+incomplete input.<br>
+<br>
+If domain reported no value for over two cycles, it is excluded from
+normal participation in&nbsp;Membalance (consideration for shrinking or
+expanding) until it starts reporting rate value again.<br>
+<br>
+Membalance can still shrink non-reporting domain but only as the last
+resort measure when trying to meet the goals of HOST_RESERVED_HARD or
+manual memory request by system administrator and all other means of
+memory extraction have been exhausted (i.e. all participating domains
+have been shrunk to their DMEM_MIN size).</td>
+</tr>
+</tbody>
+</table>
+</div>
+<br>
+Per-domain settings:<br>
+<br>
+<div style="margin-left: 40px;">
+<table style="text-align: left;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">DMEM_MIN</td>
+<td>Minimum size that domain can be shrunk to in the event
+of memory shortage.<br>
+<br>
+Low-rate domains are likely to be sized between DMEM_MIN and DMEM_QUOTA.<br>
+<br>
+This setting can be though of as a practical domain size for very
+low-RATE domains.<br>
+</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">DMEM_QUOTA</td>
+<td>Memory quota for a domain<br>
+<br>
+Quota setting approximates domain size on a memory-constrained system
+in the event a domain keeps creating data&nbsp;read-in load.<br>
+<br>
+This is a practical domain size limit for low- or mid-RATE domains.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">DMEM_MAX</td>
+<td>Maximum size a domain can be expanded to.<br>
+<br>
+This approximates domain size on a memory-abundant system in the event
+a
+domain keeps creating data&nbsp;read-in load.<br>
+<br>
+This is a practical domain size limit for high-RATE domains.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">RATE_HIGH</td>
+<td>High-rate threshold for data&nbsp;read-in rate
+(kb/s).</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">RATE_LOW</td>
+<td>Low-rate threshold for data&nbsp;read-in rate
+(kb/s).</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">RATE_ZERO</td>
+<td>Data&nbsp;read-in rate &lt;= RATE_ZERO is
+considered to be
+the same as zero rate and shall not cause domain expansion.</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">DMEM_INCR</td>
+<td>Memory amount to expand domain by (as % of current
+allocation).</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">DMEM_DECR</td>
+<td>Memory amount to shrink domain by (as % of current
+allocation).</td>
+</tr>
+<tr>
+<td style="background-color: rgb(204, 204, 255);">GUEST_FREE_THRESHOLD</td>
+<td>If guest free memory (as a percentage of guest
+total system memory) is &gt; GUEST_FREE_THRESHOLD, regard domain&#8217;s
+data&nbsp;read-in rate as zero, regardless of the reported rate.<br>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<br>
+Consistency check condtitions:<br>
+<br>
+<div style="margin-left: 40px;">RATE_HIGH &gt; RATE_LOW<br>
+DMEM_HIGH &gt;= DMEM_QUOTA<br>
+DMEM_QUOTA &gt;= DMEM_MIN<br>
+HOST_RESERVED_SOFT &gt;= HOST_RESERVED_HARD<br>
+GUEST_FREE_THRESHOLD in range 0%...100%<br>
+</div>
+<br>
+Memory balancing algorithm runs periodically (as defined by the
+INTERVAL setting, unless paused by system manager or there are no
+domains to manage).<br>
+<br>
+At each algorithm tick, the algorithm executes in four stages:<br>
+<br>
+<span style="font-weight: bold;">Stage 1 (data collection):</span><br>
+<ul>
+<li>Collect data from the domains: for each domain managed by&nbsp;Membalance read its xenstore &#8220;report&#8221; key and reset the key.<br>
+<br>
+</li>
+<li>If in-domain guest operating system has plenty of free
+memory (reported guest free memory &gt; GUEST_FREE_THRESHOLD
+percent of total guest system memory), treat reported
+data&nbsp;read-in rate
+as 0, regardless of the reported rate value.<br>
+<br>
+</li>
+<li>If domain data&nbsp;read-in rate is &lt;=
+RATE_ZERO, treat
+reported data&nbsp;read-in rate as 0, regardless of the reported
+rate value.<br>
+<br>
+</li>
+<li>Disregard domains in the following states: paused, crashed,
+dying, shutdown. Only manage domains in the states: running, blocked.<br>
+<br>
+</li>
+<li>Disregard non-participating domains (membalance = off).<br>
+<br>
+</li>
+<li>Disregard currently non-participating domains (that have
+not reported data within more than one cycle/tick).<br>
+<br>
+</li>
+<li>If domain has not reported data for the current cycle,
+presume reading to be the same as for the last cycle.<br>
+<br>
+</li>
+<li>If parameter TRIM_UNRESPONSIVE is set and domain did not
+provide rate data reports for over TRIM_UNRESPONSIVE seconds, and
+current domain size is over DMEM_QUOTA, the domain is trimmed town to
+DMEM_QUOTA.<br>
+<br>
+</li>
+<li>Calculate values of SLOW_RATE and FAST_RATE.</li>
+</ul>
+<div style="margin-left: 40px;">These are the values of
+RATE that have the history of RATE factored
+into them and are used further to compute domain pressure force to
+expand, and also domain force of resistance to contraction. We use
+these effective values of rate with history factored into them instead
+of just the latest reading of RATE so the algorithm stays tuned to
+domain rate trend and is not thrown off by temporarily and transient
+abrupt in rate reading for just one or two ticks.<br>
+<br>
+FAST_RATE is used to calculate domain pressure force to expand.<br>
+SLOW_RATE is used to calculate domain force to resist contraction.<br>
+<br>
+The value of SLOW_RATE is defined as:<br>
+<br>
+<div style="margin-left: 40px;">SLOW_RATE =
+max(slow_moving_average(RATE), RATE)<br>
+</div>
+<br>
+Slow moving average is taken over a number of recent samples.<br>
+In no event SLOW_RATE is less than the current RATE reading.<br>
+<br>
+Right now moving average for SLOW_RATE is hardwired to be taken over
+the readings for 5 recent intervals, with decreasing weights for older
+intervals. In the future it may be made tunable both on global and
+per-domain basis to cover a longer history than currently used five
+recent ticks data.<br>
+<br>
+Currently, heuristically, FAST_RATE is just RATE, i.e. most recent
+reading of RATE. In the future the formula for calculating FAST_RATE
+may me modified to temper down the initial response for infrequent
+one-interval intermittent spikes.<br>
+</div>
+<br>
+If automatic memory adjustment is paused by system administrator,
+further stages are not performed.<br>
+<br>
+<span style="font-weight: bold;">Stage 2 (free memory HARD
+constraint):</span><br>
+<br>
+<div style="margin-left: 40px;">Meet HOST_RESERVED_HARD
+constraint.<br>
+<br>
+If HOST_FREE dropped below HOST_RESERVED_HARD, try to squeeze managed
+domains to bring HOST_FREE back to HOST_RESERVED_HARD or as close to it
+as possible.<br>
+<br>
+This stage is performed in several rounds, executed until either the
+target for HOST_FREE getting back to HOST_RESERVED_HARD is met, or all
+rounds are exhausted and membalanced is still unable to meet the target
+for HOST_RESERVED_HARD.<br>
+<br>
+Rounds start with trimming down domains that are least likely to suffer
+as the result of the trimming and proceed towards domain that are
+likely to suffer more heavily if trimmed.<br>
+<br>
+<span style="font-weight: bold;"><span style="text-decoration: underline;">Round 1.</span> </span>Select
+domains with RATE &lt;= RATE_LOW and sort them by the time they had
+rate &lt;= RATE_LOW. Starting from domain that had low rate for
+longest time and towards domain that had it for shortest time, trim
+each domain by up to DMEM_DECR (but never below DMEM_MIN).<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+2.</span> Select domains with RATE &lt; RATE_HIGH and size
+&gt; DMEM_QUOTA, excepting domains already trimmed in the previous
+round, and sort them by the time they had rate &lt; RATE_HIGH.
+Starting from domain that had rate &lt; RATE_HIGH for longest time
+and towards domain that had it for shortest time, trim each domain by
+up to DMEM_DECR (but never below DMEM_QUOTA).<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+3.</span> If still cannot meet the target, select domains with
+RATE &lt; RATE_HIGH and size &gt; DMEM_QUOTA, regardless of
+whether they were already trimmed in the previous rounds, and sort them
+by the time they had rate &lt; RATE_HIGH. Starting from domain that
+had rate &lt; RATE_HIGH for longest time and towards domain that
+had it for shortest time, and regarless of any previous trimming
+amount, trim each domain [additionally] by up to DMEM_DECR (but never
+below DMEM_QUOTA) on top of any previous trimming.<br>
+<br style="text-decoration: underline; font-weight: bold;">
+<span style="text-decoration: underline; font-weight: bold;">Round
+4.</span> Calculate pressure-resistance function (as described
+below in the write-up for stage 4) for every domain above DMEM_QUOTA
+(the advisory value of RATE we use in this calculation is made not
+perfectly valid by previous contractions, but this is the best we can
+do at this point). Sort the list by the value of the function. Starting
+from lowest-pressure domain towards highest-pressure domains, trim each
+domain by up to DMEM_DECR (but not brining it below DMEM_QUOTA) until
+the deficit is satisfied.<br>
+<br>
+Treat domains that have not reported their rate lately as having zero
+rate.<br>
+<br>
+If was unable to satisfy the deficit within one pass, repeat passes
+until either the deficit is satisfied or all domains are brought down
+to DMEM_QUOTA.<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+5.</span> If the deficit is still not satisfied at this point,
+try to satisfy it by gradually trimming domains from DMEM_QUOTA towards
+DMEM_MIN. Recalculate pressure-resistance function for each domain
+using the last sampled RATE value for this domain (this is suboptimal,
+but the best we can do at this point). Starting from the
+lowest-pressure domain towards highest-pressure domain, trim each
+domain by up to DMEM_DECR (but not brining it below DMEM_MIN) until the
+deficit is satisfied.<br>
+<br>
+Treat domains that have not reported their rate lately as having zero
+rate, except if a domain is very young (domain uptime is less
+than&nbsp;<span style="font-style: italic;">startup_time</span>
+&#8211; a parameter assignable on a per-domain basis but also having global
+default), in which case the domain is given a benefit of the doubt and
+ascribed the rate just above&nbsp;<span style="font-style: italic;">rate_high</span>.<br>
+<br>
+If was unable to satisfy the deficit within one pass, repeat passes
+until either the deficit is satisfied or all domains are brought down
+to DMEM_MIN.<br>
+<br>
+If deficit is still not satisfied at this point, there is nothing
+further&nbsp;Membalance can do, since all domains are now down to their
+DMEM_MIN size, and&nbsp;Membalance may not try to trim domains any further.
+If all domains are already at their DMEM_MIN or below, quit the
+algorithm.<br>
+</div>
+<br>
+<span style="font-weight: bold;">Stage 3 (free memory SOFT
+constraint):</span><br>
+<br>
+<div style="margin-left: 40px;">Try to meet
+HOST_RESERVED_SOFT constraint.<br>
+<br>
+If HOST_FREE dropped below HOST_RESERVED_SOFT, try to trim managed
+domains to bring HOST_FREE back to HOST_RESERVED_SOFT or as close to it
+as possible.<br>
+<br>
+Unlike the adjustment for HOST_RESERVED_HARD, the adjustment to
+HOST_RESERVED_SOFT does not have to be performed instantaneously and
+can be performed gradually over a number of cycles (algorithm ticks).<br>
+<br>
+Unlike in HOST_RESERVED_HARD stage, trimming of domains within a single
+tick is limited and no excessive trimming is performed to reach the
+HOST_RESERVED_SOFT target. Rather, the intent is to reach it gradually
+over a number of ticks by only a moderate trimming during each tick.<br>
+<br>
+This stage is executed in up to three rounds.<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+1.</span> Select domains with RATE &lt;= RATE_LOW and size
+&gt; DMEM_QUOTA. Sort the list by the time domain RATE was
+&lt;= RATE_LOW. Starting from the domains that had low rate for
+longest time, and towards domains that had it for shortest time, trim
+each by up to DMEM_DECR (but not below DMEM_QUOTA) until the deficit is
+satisfied (i.e. HOST_FREE is increased up to HOST_RESERVED_SOFT).<br>
+<br>
+If domain has already been previously trimmed in current algorithm
+tick, it can only be trimmed at this stage to the extent that the total
+trim does not exceed DMEM_DECR.<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+2.</span> If deficit is still not satisifed, repeat in a similar
+fashion with domains with RATE &lt;= RATE_LOW but size &lt;=
+DMEM_QUOTA. In this round domains are trimmed by up to DMEM_DECR but
+not below DMEM_MIN. Similarly to the previous round, trimming is
+limited by DMEM_DECR including the trim applied previously within the
+same tick.<br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Round
+3.</span> If deficit is still not satisifed, repeat in a similar
+fashion with domains with RATE &lt; RATE_HIGH and size &gt;
+DMEM_QUOTA.<br>
+<br>
+If still unable to satisfy the deficit, leave it off at this point and
+try again at next tick.<br>
+<br>
+To minimize the probability of a jitter of reallocating memory back and
+forth between very similar domains (domain upsize/downsize jitter), a
+domain that has been expanded not more than&nbsp;<span style="font-style: italic;">shrink_protection_time ticks</span>
+back is not considered elgigible for shrinking at stages 3 and 4
+(stages &#8220;meeting soft free memory constraint&#8221; and &#8220;domain
+rebalancing&#8221;). However this protection is not in effect for stage 2
+(stage &#8220;meeting hard free memory constraint&#8221;).<br>
+<br>
+Outlined stage 3 algorithm can also be expressed in terms of effective
+pressure function for free memory region (see below in stage 4
+write-up).<br>
+<br>
+Future enhancements to the algorithm may also take into account longer
+term RATE history for a domain in a more sophisticated way, e.g. its
+averaging over long-term period and absolute values of rate.<br>
+</div>
+<br>
+<span style="font-weight: bold;">Stage 4 (domain
+balancing):</span><br>
+<br>
+<div style="margin-left: 40px;">Perform dynamic domain
+expansion or contraction, according to current
+memory demand (pressure) of specific domains.<br>
+<br>
+Domains with high memory pressure inside them can be expanded by using
+free memory if available or at the cost of shrinking domains with low
+memory pressure.<br>
+<br>
+Domains are always expanded at the expense of available free memory
+first if free memory is available, and are expanded at the cost of
+shrinking other domains only if free memory is unavailable (including
+due to the constraints imposed by HOST_RESERVED_SOFT and
+HOST_RESERVED_HARD).<br>
+<br>
+There are two memory pressure functions calculated for each domain:<br>
+<ul>
+<li><span style="font-style: italic;">Pressure-out
+(expansion) force</span> indicates &#8220;outward-directed&#8221; force for
+the expansion of this domain.<br>
+<br>
+</li>
+<li><span style="font-style: italic;">Pressure-resistance
+force</span> indicates how strongly a domain resists an
+attempt to contract it.<br>
+</li>
+</ul>
+(By the way of an example, consider an analogy in the physical world: a
+stone rock would have very high pressure-resistance force, but zero
+pressure-out force. Same applies to a domain at DMEM_MIN and rate
+&lt;= RATE_LOW).<br>
+<br>
+When domain X wants to be expanded, but free memory is unavailable for
+the expansion of X, it can expand at the cost of shrinking another
+domain Y if pressure-out(X) &gt; pressure-res(Y).<br>
+<br>
+Pressure functions are calculated according to domain size vs. its
+DMEM_MIN and DMEM_QUOTA, and its data&nbsp;read-in rate vs. its
+RATE_LOW and
+RATE_HIGH values as follows:<br>
+</div>
+<div style="margin-left: 80px;"><br>
+</div>
+<table style="text-align: left; margin-left: 80px;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">RATE</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">DMEM_SIZE</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);"><br>
+&nbsp;(force_resist)<br>
+pressure-res</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">(force_expand)<br>
+pressure-out</td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt;= RATE_HIGH</td>
+<td style="text-align: center;">&gt; QUOTA</td>
+<td style="text-align: center;">50 + <span style="font-style: italic;">x</span></td>
+<td style="text-align: center;">50 + <span style="font-style: italic;">x</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt;= RATE_HIGH</td>
+<td style="text-align: center;">MIN ... QUOTA</td>
+<td style="text-align: center;">100 + <span style="font-style: italic;">x</span></td>
+<td style="text-align: center;">100 + <span style="font-style: italic;">x</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt;= RATE_HIGH</td>
+<td style="text-align: center;"> &lt;= MIN</td>
+<td style="text-align: center;">500</td>
+<td style="text-align: center;">300</td>
+</tr>
+<tr>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+</tr>
+<tr>
+<td style="text-align: center;">LOW ... HIGH</td>
+<td style="text-align: center;">&gt; QUOTA</td>
+<td style="text-align: center;">30 + <span style="font-style: italic;">x</span></td>
+<td style="text-align: center;">30 + <span style="font-style: italic;">x</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">LOW ... HIGH</td>
+<td style="text-align: center;">MIN ... QUOTA</td>
+<td style="text-align: center;">60 + <span style="font-style: italic;">x</span></td>
+<td style="text-align: center;">60 + <span style="font-style: italic;">x</span></td>
+</tr>
+<tr>
+<td style="text-align: center;">LOW ... HIGH</td>
+<td style="text-align: center;"> &lt;= MIN</td>
+<td style="text-align: center;">500</td>
+<td style="text-align: center;">200</td>
+</tr>
+<tr>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+<td style="text-align: center; background-color: rgb(204, 204, 204);"></td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;= RATE_LOW</td>
+<td style="text-align: center;">&gt; QUOTA</td>
+<td style="text-align: center;">0</td>
+<td style="text-align: center;">0</td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;= RATE_LOW</td>
+<td style="text-align: center;">MIN ... QUOTA</td>
+<td style="text-align: center;">40</td>
+<td style="text-align: center;">0</td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;= RATE_LOW</td>
+<td style="text-align: center;"> &lt;= MIN</td>
+<td style="text-align: center;"> 500</td>
+<td style="text-align: center;"> 0</td>
+</tr>
+</tbody>
+</table>
+<div style="margin-left: 80px;"><br>
+Value of&nbsp;<span style="font-style: italic;">x</span>
+ranges from 0.0 to 1.0 and is calculated depending on
+domain RATE. The exact formula for calculating <span style="font-style: italic;">x</span> is unimportant,
+since its only purpose is to represent relative ordering of domains
+within the same tier (i.e. having the same pre-&#8220;+&#8221; base function value
+base, or that is to say in the same RATE and DMEM_SIZE category in the
+table). Currently&nbsp;<span style="font-style: italic;">x</span>
+is calculated as x = RATE / RMAX where RMAX is a
+maximum rate for all managed domains being balanced.<br>
+<br>
+Currently&nbsp;<span style="font-style: italic;">x</span>
+is calculated on the basis of latest reported RATE values
+for each domain, however in the future the algorithm may take into
+account longer-term history of RATE, for instance domains that had low
+RATE for long period of time may be more eligible for shrinking than
+domains that had low RATE for only a short period of time, and before
+that exhibited a spike of higher RATE activity.<br>
+<br>
+Future version of the algorithm may also introduce the following fine
+tuning: among domains with roughly the same RATE, domains with
+substantially larger DMEM_SIZE may be more eligible for shrinking and
+less eligible for expansion than domains with smaller DMEM_SIZE and
+similar RATE.<br>
+<br>
+<span style="font-style: italic;">Important:</span>
+if a domain has been contracted within the current algorithm
+tick to a full value of its DMEM_DECR (or even beyond it for the sake
+of meeting HOST_RESERVED_HARD target), its pressure-resistance function
+goes to 500, making the domain ineligible for further shrinking within
+the current tick.<br>
+<br>
+<span style="font-style: italic;">Important: </span>Domain
+expansion force is defined only for domains that have
+recently reported rate data. Domain contraction-resistance force
+however is defined also for domains that did not report data recently.
+Although such domains do not participate in rebalancing (stage 4), nor
+SOFT-targeting (stage 3), nor most rounds of HARD-targeting stage 2,
+rounds 1-3), but they do participate in HARD-targeting (stage2) rounds
+4 and 5. For this special use case, such domains do have
+contraction-resistance force defined as follows:<br>
+<br>
+<table style="text-align: left;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">DMEM_SIZE</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">(force_resist)<br>
+pressure-res</td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt; QUOTA</td>
+<td style="text-align: center;">32</td>
+</tr>
+<tr>
+<td style="text-align: center;">MIN ... QUOTA</td>
+<td style="text-align: center;">62</td>
+</tr>
+<tr>
+<td style="text-align: center;"> &lt;= MIN</td>
+<td style="text-align: center;">500</td>
+</tr>
+</tbody>
+</table>
+<br>
+</div>
+<div style="margin-left: 40px;"><br>
+Host free memory area also has effective pressure function ascribed to
+it, defined as:<br>
+<br>
+</div>
+<table style="text-align: left; margin-left: 80px;" border="1" cellpadding="2" cellspacing="2">
+<tbody>
+<tr>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">HOST_FREE</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">(force_resist)<br>
+pressure-res</td>
+<td style="text-align: center; vertical-align: bottom; background-color: rgb(204, 204, 255);">(force_expand)<br>
+pressure-out</td>
+</tr>
+<tr>
+<td style="text-align: center;">&gt;
+RESERVED_SOFT</td>
+<td style="text-align: center;">0</td>
+<td style="text-align: center;">0</td>
+</tr>
+<tr>
+<td style="text-align: center;">SOFT ... HARD</td>
+<td style="text-align: center;">45</td>
+<td style="text-align: center;">35 - 45</td>
+</tr>
+<tr>
+<td style="text-align: center;">&lt;=
+RESERVED_HARD</td>
+<td style="text-align: center;">1000</td>
+<td style="text-align: center;">450</td>
+</tr>
+</tbody>
+</table>
+<div style="margin-left: 80px;"><br>
+During stage 3, when HOST_FREE is in SOFT...HARD range,
+expansion-pressure function is effectively applied in two steps. <br>
+<br>
+First
+it is effectively applied with value of 35, i.e. able to squeeze
+domains with RATE = LOW...HIGH and DMEM_SIZE &gt; DMEM_QUOTA. <br>
+<br>
+If it
+were impossible to satisfy HOST_RESERVED_SOFT target this way, then
+expansion-pressure function is applied again, now with value of 45 and
+able to contract domains in the category RATE &lt;= RATE_LOW and
+with size DMEM_MIN...DMEM_QUOTA.<br>
+</div>
+<div style="margin-left: 40px;"><br>
+Stage 4 of the algorithm runs as follows.<br>
+<br>
+First find out if there are any domains wishing to expand. A domain
+wants to expand if its pressure-out function is &gt; 0. In no event
+expand domain above DMEM_MAX. If there are no domains to expand, quit.<br>
+<br>
+Sort domains wishing to expand by their pressure-out function and try
+to accommodate their expansion requests in the sort order, starting
+from the domain with the highest value of pressure-out function and
+moving towards domains with lower pressure-out value.<br>
+<br>
+Domain expansion target is normally indicated by DMEM_INCR. However if
+domain&#8217;s DMEM_SIZE &lt; DMEM_MIN, then the target is expansion to
+DMEM_MIN.<br>
+<br>
+Free memory provides the first source for request accommodation.<br>
+<br>
+Free memory supply for all domains is constrained by HOST_RESERVED_HARD
+(which is on top of Xen free memory slack, so memory reserved for Xen
+free memory slack is left untouched as well).<br>
+<br>
+Free memory supply for domains with RATE &lt; RATE_HIGH and
+executing above their DMEM_QUOTA is also constrained by
+HOST_RESERVED_SOFT.<br>
+<br>
+A domain expands into free memory to the extent possible, as indicated
+by pressure-resistance function of host free memory area (note that if
+allocation request causes remaining free memory size to cross
+HOST_RESERVED_SOFT or HOST_RESERVED_HARD threshold, then the allocation
+is performed accounting for such a crossing, i.e. domain pressure-out
+may be high enough to push to the threshold, but not necessarily beyond
+the threshold.)<br>
+<br>
+If domain expansion request cannot be satisfied at the expense of free
+memory, try to satisfy it at the cost of shrinking other domains.<br>
+<br>
+Sort domains (using another vector, distinct from expansion-order
+vector) in the order of their pressure-resistance function, starting
+from the lowest value towards the highest. Going from the first
+(lowest-resistance) element in this vector towards last (highest
+resistance), perform the following:<br>
+<br>
+</div>
+<ul style="margin-left: 40px;">
+<li>If <span style="font-style: italic;">shrink-candidates-vec-domain</span>
+==
+<span style="font-style: italic;">expand-candidates-vec-domain</span>,
+skip this shrink-candidates-vec-domain.<br>
+<br>
+</li>
+<li>If <span style="font-style: italic;">pressure-resistance(shrink-candidates-vec-domain)</span>
+&gt;= <span style="font-style: italic;">pressure-out(expand-candidates-vec-domain)</span>,
+terminate the
+rebalancing process, as even the weakest shrink candidate will not
+yield its memory to the strongest expansion candidate.<br>
+<br>
+</li>
+<li>Expand <span style="font-style: italic;">expand-candidate-vec-domain</span>
+at the cost of shrinking
+<span style="font-style: italic;">shrink-candidate-vec-domain</span>.<br>
+</li>
+</ul>
+<div style="margin-left: 40px;">
+<div style="margin-left: 40px;">Total expansion of <span style="font-style: italic;">expand-vec-domain</span>
+in the tick cycle cannot exceed
+DMEM_INCR, except for domains sized below DMEM_MIN and expanding to
+DMEM_MIN.<br>
+<br>
+Total contraction of <span style="font-style: italic;">shrink-vec-domain</span>
+in the whole algorithm tick
+cannot exceed DMEM_DECR.<br>
+<br>
+Since pressure-resistance function of a domain can increase while
+taking memory out of it if the domain reaches the thresholds of
+DMEM_QUOTA or DMEM_MIN, pressure-resistance function may need to be
+recalculated at this point and <span style="font-style: italic;">shrink-vector</span>
+re-sorted (and shrink
+candidate scanning re-started from the lowest index again); and
+similarly for expansion candidates vector if the expansion crosses the
+thresholds of DMEM_QUOTA or DMEM_MIN of the domain being expanded.<br>
+<br>
+Once domain has been shrunk by DMEM_DECR or more during the current
+algorithm tick (this also includes shrinking at stages 2 and 3), its
+pressure-resistance function value increases to 500 to reflect this
+domain is no longer eligible to be shrunk during the current tick, and
+<span style="font-style: italic;">shrink-candidates-vector</span>
+must be re-sorted, and scanning re-started
+from the lowest index again.<br>
+</div>
+<ul>
+<li>To reduce calculations, domains that are not eligible to be
+expanded
+or contracted are removed from the corresponding vectors.</li>
+</ul>
+To minimize the probability of a jitter of reallocating memory back and
+forth between very similar domains (domain upsize/downsize jitter), a
+domain that has been expanded not more than&nbsp;<span style="font-style: italic;">shrink_protection_time ticks</span>
+back is not considered elgigible for shrinking at stages 3 and 4
+(stages &#8220;meeting soft free memory constraint&#8221; and &#8220;domain
+rebalancing&#8221;). However this protection is not in effect for stage 2
+(stage &#8220;meeting hard free memory constraint&#8221;).<br>
+</div>
+<br>
+In all stages of the algorithm:<br>
+<ul>
+<li>DMEM_INCR and DMEM_DECR are rounded to the closest memory
+allocation
+quant (typically, Xen page size).<br>
+<br>
+</li>
+<li>Domain is never expanded above DMEM_MAX and never
+contracted below
+DMEM_MIN.<br>
+<br>
+</li>
+<li>If domain has been contracted or expanded by amount that
+causes its
+DMEM_SIZE to reach or cross DMEM_MIN or DMEM_QUOTA, its pressure
+functions are re-calculated at this point.<br>
+<br>
+</li>
+<li>If domain has been shrunk by DMEM_DECR or more in the
+current cycle,
+its pressure-resistance function goes up to 500.</li>
+</ul>
+If domain has not recently provided data, it is largely left alone and
+does not participate in rebalancing (stage 4), SOFT-targeted trimming
+(stage 3) and most of HARD-targeted trimming (rounds 1, 2 and 3 of
+stage 2). It does however participate in HARD-targeted rounds 4 and 5.
+Also if domain has setting&nbsp;<span style="font-style: italic;">trim_unresponsive</span>
+defined (or inherited from global configuration), then after staying
+non-reporting for&nbsp;<span style="font-style: italic;">trim_unresponsive</span>
+seconds,&nbsp;Membalance will trim it down to&nbsp;<span style="font-style: italic;">dmem_quota.</span><br style="font-style: italic;">
+<br>
+Membalancectl utility provides&nbsp;<span style="font-style: italic;">free-memory</span> command
+that is used to
+reclaim requested amount of memory for purposes such as starting new
+virtual machines. This command invokes procedure <span style="font-style: italic;">sched_freemem(...)</span>
+inside&nbsp;Membalance daemon which in turn executes the routine
+implementing stage 2 of the algorithm (hard trimming), except it trims
+the domain to reclaim the amount of memory determined not by
+HOST_RESERVED_HARD, but rather requested by <span style="font-style: italic;">free-memory</span>
+command. If domain
+was shrunk in the recent tick by membalancectl&nbsp;<span style="font-style: italic;">free-memory</span> command
+(or multiple executions of&nbsp;<span style="font-style: italic;">free-memory</span>
+command), the aggregate amount
+it was shrunk by is used during the next tick time to adjust the amount
+calculated by DMEM_DECR, in an attempt to ensure a domain does not get
+shrunk by more than DMEM_DECR total within a single tick, except in
+dire memory shortage.<br>
+<br>
+After all stages of the algorithm calculate scheduled expansions and
+contractions for managed domains, these contractions and expansions are
+executed. First all the contractions are executed. Then&nbsp;Membalance
+tries to execute the scheduled expansions. The ability
+of&nbsp;Membalance to
+execute the expansions is contingent on available free memory, which in
+turn is contingent on domains ordered to shrink executing their
+de-ballooning promptly enough. When executing an adjustment
+cycle,&nbsp;Membalance will wait for domains ordered to shrink to
+release their
+memory for up to a timeout interval derived from configuration
+parameters (see <span style="font-style: italic;">domain_expansion_timeout_xxx</span>).
+If they fail to release required amont of memory within this time and
+Xen stays
+short of free memory,&nbsp;Membalance will only expand domains scheduled to
+expand to the extent available memory allows it, and will leave the
+adjustment of remaining domains till the next tick.<br>
+<br>
+The algorithm may be refined in the future.<br>
+Some possible future changes to consider are:<br>
+<ol>
+<li>As free memory is getting in short supply (e.g. crossing
+into HOST_RESERVED_SOFT zone), dynamically scale up DMEM_DECR, making
+the algorithm a more agressive stripper of the domains with lower claim
+to memory. Likewise, if free memory is ample, dynamically scale up
+DMEM_INCR making for a faster expansion of the domains in&nbsp;need
+of
+memory.<br>
+<br>
+</li>
+<li>When calculating pressure-resistance function, account for
+a time a domain have been in the same category of RATE (&lt;=
+RATE_LOW, RATE_LOW ... RATE_HIGH, &gt;= RATE_HIGH). For example,
+domains that had low rate for a long time must be squeezable more
+easily than domains that had a burst of activity and had been inactive
+only for a short time.<br>
+<br>
+Also account for long-term rate history during stage 3 (shrinking
+domains to meet HOST_RESERVED_SOFT target) in a more sophisticated way,
+such as tracking down average rate over long-time peiod and taking into
+account absolute value of rate.<br>
+<br>
+</li>
+<li>When calculating pressure-resistance function, account for
+domain size. Among domains with roughly the same RATE, domains with
+substantially larger DMEM_SIZE may be more eligible for shrinking and
+less eligible for expansion than domains with smaller DMEM_SIZE and
+similar RATE.<br>
+<br>
+</li>
+<li>Shrink long waiters: In severe memory shortage, shrink
+domains with low % of execution time, i.e. mostly sleeping (cpu exec
+time &lt; 1% of total time, over recent long interval). Reduce size
+by 25%?<br>
+<br>
+</li>
+<li>Proactively shrink domains that for a long time had
+reported high percentage of free system memory inside the domain (as
+reported by guest OS).<br>
+<br>
+</li>
+<li>Make moving average used to calculate SLOW_RATE tunable on
+global and per-domain basis to cover a longer history than currently
+used five recent ticks data.<br>
+<br>
+</li>
+<li>Record domain size at which it last time had&nbsp;rate
+&gt;=
+RATE_LOW or RATE_HIGH. When in need of a large block of memory e.g. for
+membalancectl&nbsp;<span style="font-style: italic;">free-memory</span>
+operation, may try to trim towards this
+size either by the whole amount or a significant fraction of it.<br>
+<br>
+</li>
+<li>Follow stage 4 (domain rebalancing) by another round of
+stage 3 (soft memory constraint). If stage 4 caused an expansion of
+some domains at the cost of&nbsp;<span style="font-style: italic;">host_reserved_soft</span>,
+then follow-up repeat of stage 3 would allow an immediate compenatory
+contraction of weak-pressure domains in order to reclaim memory from
+them to restore free memory supply back up to&nbsp;<span style="font-style: italic;">host_reserved_soft</span>
+if possible. Currently such a reclamation is delayed until the next
+tick.<br>
+<br>
+</li>
+<li>Consider the mertis of proactively squeezing the domains
+that for a long time reported a low or very low&nbsp;data read-in
+rate.</li>
+</ol>
+On a larger scale, future refinements to the algorithm should:<br>
+<ol start="10">
+<li>Incorporate in more explicit form a <span style="font-style: italic;">share</span>-based
+allocation, perhaps by making DMEM_QUOTA dynamically computable
+according to <span style="font-style: italic;">share</span>
+values assigned to all managed domains, and then further thresholded
+against <span style="font-style: italic;">quota-min</span>
+anx <span style="font-style: italic;">quota-max</span>
+absolute values (defined as per-domain properties inheritable from
+higher-level templates). Similarly, DMEM_INCR, DMEM_DECR and RATE_xxx
+may be subject for <span style="font-style: italic;">share</span>-derived
+adjustments.<br>
+<br>
+</li>
+<li>Present an explicit and simplified adjustment control for
+balancing between share-based allocation criterion and overall
+performance-based criterion.</li>
+</ol>
+<br>
+<hr>
+<a name="XENAPI"></a><br>
+<div style="text-align: center;"><span style="font-weight: bold;">DEFICIENCIES</span> <span style="font-weight: bold;">OF</span> <span style="font-weight: bold;">XEN API </span>
+</div>
+<br>
+&#8220;Testing the waters&#8221; with Membalance 0.1 indicated that Xen
+currently (4.4) has few functional omissions in the API that
+need to be addressed for any automated memory
+allocation&nbsp;application to work reliably in a production
+environment.<br>
+<br>
+<span style="font-weight: bold;"><span style="text-decoration: underline;">First.</span> <br>
+<br>
+</span>Memory
+allocated to Xen domain is composed of three main parts: domain
+pseudo-physical memory, videoram and Xen internal per-domain structures
+(hereafter we designate them as M, V and X correspondingly). <br>
+<br>
+X
+part contains items like shadow page tables, device
+data,&nbsp;buffers
+used by split drivers, LIBXL_MAXMEM_CONSTANT, LIBXL_PV_EXTRA_MEMORY or
+LIBXL_HVM_EXTRA_MEMORY etc.<br>
+<br>
+To properly control memory
+allocation to domains, the balancer needs two basic functions: (1) find
+current memory allocation, (2) set new memory allocation.<br>
+<br>
+As it
+happens, Xen provides two functions (or rather sets of functions): one
+returns current M+V+X, the other sets new target for M+V.<br>
+<br>
+Thus
+in effect Xen API makes use of two distinct memory scales, one
+representing the &#8220;visible&#8221; size of a domain (M+V scale, as indicated by
+domain size target&nbsp;recorded in
+Xenstore&nbsp;or by <span style="font-style: italic;">xc_domain_get/set_pod_target</span>
+plus
+videoram size), the other representing &#8220;total&#8221; (M+V+X) size.
+Unfortunately Xen does not expose the value of X &#8211; there is no Xen
+hypervisor call that would allow to query it, and it is not returned as
+a field in structures like xc_domaininfo_t. Thus there is no way to
+relate two scales together and make reasoning about M+V allocation
+target pn the basis of M+V+X allocation data.<br>
+<br>
+To make things worse, allocation data available for the &#8220;visible&#8221; scale
+represents only a&nbsp;<span style="font-style: italic;">desired</span>
+(target) domain size and tells nothing about its&nbsp;<span style="font-style: italic;">actual</span> size. A
+domain can have large memory <span style="font-style: italic;">target</span>
+value recorded in Xenstore but being unable to expand, therefore the
+value of <span style="font-style: italic;">target</span>
+by itself tells nothing about domain&#8217;s actual current allocation.
+Therefore a reasoning about actual current allocation can be performed
+only using <span style="font-style: italic;">xc_domaininfo_t</span>
+data (which is on M+V+X scale scale), whereas adjustments to the
+allocation can be performed only on the M+V scale &#8211; yet Xen provides no
+way to translate between the scales.<br>
+<br>
+One&nbsp;might try to
+capture the offset between the two scales (as Membalance 0.1 does), but
+there is no way to do it on a &#8220;spot&#8221; basis, it is possible at all (and
+then only in an unreliable way) after domain has been runnable&nbsp;<span style="font-style: italic;">and</span> size-stable for
+some time, i.e. had both Xenstore-recorded memory <span style="font-style: italic;">target</span> <span style="font-weight: bold;">and</span> <span style="font-style: italic;">xc_domaininfo_t.tot_pages</span>
+unchanged for some time, <span style="font-weight: bold;">and</span>
+there should be free memory available in the system, so domain does not
+stay under <span style="font-style: italic;">target</span>
+being unable to expand towards it <span style="font-weight: bold;">and</span>
+domain should be runnable <span style="font-weight: bold;">and</span>
+it should get enough execution time to let the balloon driver to
+perform the expansion <span style="font-weight: bold;">and</span>
+guest OS should be in the state that does not block balloon driver
+execution &#8211; a set of conditions that balancing application cannot
+reliably control.<br>
+<br>
+Furthermore, Xen internal data area can and
+does vary in size in response to domain activity, therefore it is not
+enough to capture it just once.<br>
+<br>
+Altogether it makes it
+impossible to implement a memory balancing application of
+production-grade reliability on top of existing Xen API.<br>
+<br>
+The easiest amendment to Xen API to address this issue would be to add
+to <span style="font-style: italic;">xc_domaininfo_t </span>(or
+extended version of it) a field representing X, i.e. the size of Xen
+internal per-domain allocation other than pseudo-physical memory and
+videoram<span style="font-style: italic;">.</span><br>
+<br>
+<span style="text-decoration: underline; font-weight: bold;">Second.</span>
+<br>
+<br>
+Unfortunately Xen does not provide an adequate facility for tracking
+current memory allocation and outstanding memory commitments/claims
+that would be usable by outside applications.<br>
+<br>
+Specifically, Xen
+does not provide an adequate way to figure out outstanding memory lien
+for a domain in the process of being expanded, i.e. the difference
+between its current allocation and target allocation, nor the sum of
+all outstanding liens weighing against the remaining free memory. Xen
+does have the notion of <span style="font-style: italic;">outstanding_pages</span>,
+but it is used only during the initial domain creation, not in the
+process of domain expansion.<br>
+<br>
+A proper memory allocation/commitments tracking facility ought to
+provide the following data:<br>
+<ol>
+<li>Currently allocated M+V+X size for every domain.<br>
+<br>
+</li>
+<li>Separately, X part of current allocation.<br>
+<br>
+</li>
+<li>Target M+V+X size for every domain (distinct from item #1
+for domains in the process of expansion or contraction).<br>
+<br>
+</li>
+<li>Separately, X part of target allocation if different from
+(2).<br>
+<br>
+</li>
+<li>Summary (1) and (3) for all the domains hosted by
+hypervisor.<br>
+<br>
+</li>
+<li>Liens data should be lockable (perhaps for lien increase
+only&nbsp;&#8211; see below).</li>
+</ol>
+Unfortunately as of current version (4.4) Xen does not provide this
+data.<br>
+<br>
+There are&nbsp;<span style="font-style: italic;">target</span>
+and&nbsp;<span style="font-style: italic;">videoram</span>
+sizes recorded in Xenstore, but they
+constitute only&nbsp;M+V part of domain size that&nbsp;does not
+include
+the&nbsp;X part &#8211; the size of a domain&#8217;s Xen internal data area
+which
+is not
+stored or published anywhere. Therefore capturing&nbsp;<span style="font-style: italic;">target</span> and&nbsp;<span style="font-style: italic;">videoram</span> values for
+all the domains<br>
+<br>
+<div style="margin-left: 40px;">(overhead issues aside --
+but this can be worked around by reading watch-updates from Xenstore
+<span style="font-style: italic;">/local/domain</span>
+key and its subkeys, rather than reading Xenstore keys
+every time the values are needed)<br>
+</div>
+<br>
+does not provide us means to
+find out &#8220;true free memory size&#8221; because the&nbsp;X part cannot be
+accounted for.
+Speaking in terms of Xen interface structures, knowing&nbsp;<span style="font-style: italic;">target +&nbsp;videoram</span>
+does not let us reason about <span style="font-style: italic;">xc_domaininfo_t.tot_pages</span>
+and
+vice versa. In effect, Xen/XL operate two disjoint scales of memory
+sizing with no conversion between them possible for an outside
+application.<br>
+<br>
+Domains
+may be in the process of shrinking or
+expansion (including domains not managed by&nbsp;Membalance) and their
+current size can be distinct from their allocation targets and in the
+process of moving towards the targets. Thus capturing just current size
+or free memory does not provide us &#8220;true free size&#8221; until such movement
+is completed, since Xen does not let us know the outstanding
+commitments, and there is no reliable way to relate M+V scale to M+V+X
+scale &#8211; in fact no way at all while the expansion is in progress.<br>
+<br>
+Thus the only way left for us to find or rather
+pray to approximate &#8220;true free size&#8221; is to wait for domain resizings in
+progress to complete by observing free memory size to stabilize over
+some time.<br>
+<br>
+This is very unreliable because:<br>
+<ol>
+<li>A domain
+in the process of expansion or contraction may temporary stall, either
+because it is not alloted enough CPU time, or because some intra-guest
+activity temporarily preempted the balloon driver.<br>
+<br>
+</li>
+<li>A domain can be paused.<br>
+<br>
+</li>
+<li>Multiple domains can be expanding and shrinking
+simultaneously
+compensating each others group impact on free memory and creating an
+illusion that a stabilization had been achieved.</li>
+</ol>
+Once these
+conditions clear, domain will resume its expansion or contraction, or
+multi-domain expansion and contraction will get out of mutual balance,
+and the assumption of having acquired &#8220;true free memory size&#8221; based on
+an apparent stability of free memory amount on the host will prove
+wrong.<br>
+<br>
+Thus
+any reading of &#8220;Xen free memory&#8221; is, strictly speaking, meaningless
+since it represents merely a spot reading and there may be domains,
+including domains outside of our control, that are expanding or
+shrinking, and it is not possible for us to know the extent of their
+outstanding lien on free memory.<br>
+<br>
+The easiest amendment to Xen API to address this issue would be:<br>
+<ul>
+<li>Add to <span style="font-style: italic;">xc_domaininfo_t
+</span>(or extended version of it) a field representing X.<br>
+<br>
+</li>
+<li>Add to <span style="font-style: italic;">xc_domaininfo_t
+</span>(or extended version of it) a field representing <span style="font-style: italic;">target</span>
+(target POD size), so we do not need to rely on reading it from
+Xenstore &#8211; nor suffer from possibly delayed Xenstore watch events and
+thus stale cache data. This would represent a lien for M+V part.<br>
+<br>
+</li>
+<li>If domain is currently expanding and its expansion to <span style="font-style: italic;">target </span>is likely
+to result in an increased value of X, then an esitmate of new X once <span style="font-style: italic;">target</span> is reached.
+The difference with current value of X would represent a lien for X
+part.<br>
+<br>
+</li>
+<li>Alternatively, a summary lien for an expanding domain can
+be reported via existing field <span style="font-style: italic;">xc_domaininfo_t.</span><span style="font-style: italic;">outstanding_pages</span>.<br>
+<br>
+</li>
+<li>A system-wide sum of all outstanding liens. It can be
+reported via existing field <span style="font-style: italic;">xc_physinfo_t.outstanding_pages,
+</span>it is just not currently used to track domain
+expansions.<br>
+<br>
+</li>
+<li>While
+memory balancer is performing memory rebalancing cycle, it is desirable
+to lock out an execution of all new memory expansion requests, so no
+new memory liens can be put out while memory&nbsp;balancer
+is running its calculations. This ensures that memory balancer can
+perform calculations on valid data and well-defined amount &#8220;true free
+memory&#8221; (less outstanding liens), and avoid overcommittment of
+remaining free memory due to concurrent claims being made by other
+applications. This implies that functions like <span style="font-style: italic;">xc_domain_set_pod_target</span>
+or <span style="font-style: italic;">xc_domain_claim_pages</span>
+would have to stall if they result in increasing domain&#8217;s lien on
+memory while the lock on&nbsp;lien increase is engaged.
+Decreasing the lien is fine and does not have to cause a wait. In
+practical terms it means that while a balancer runs a cycle determining
+new allocations, it would temporarily block concurrent creation of new
+domains (such as with <span style="font-style: italic;">xl
+create</span>) or manual expansion of domain sizes (such as with <span style="font-style: italic;">xl mem-set</span>),
+however&nbsp; domains can terminate and release resources without a
+delay.</li>
+</ul>
+<span style="text-decoration: underline; font-weight: bold;">Third.</span>
+<br>
+<br>
+XL library should export routine <span style="font-style: italic;">parse_config_data</span>
+or provide some other means for an application outside of XL to be able
+to evaluate how much memory (<span style="font-style: italic;">need_memkb</span>)
+is required to create a domain identified by supplied domain confiig
+file.<br>
+&nbsp;<br>
+<hr><a name="ROADMAP"></a><br>
+<div style="text-align: center;"><span style="font-weight: bold;">FUTURE WORK / ROADMAP</span><br>
+</div>
+<ul>
+<li>Implement changes to Xen memory allocation reporting API
+described in section XEN API DEFICIENCIES.<br>
+Without these changes, no production-grade memory balancing application
+can be implemented.<br>
+<br>
+</li>
+<li>Implement <span style="font-style: italic;">memprobe</span>
+daemons for Windows and other relevant guests such as
+perhaps&nbsp;BSD.<br>
+<br>
+</li>
+<li>Implement a patch for Linux kernel (and a corresponding
+change for Linux version of <span style="font-style: italic;">memprobe</span>)
+to keeps a statistics of non-cached block IO operations caused by direct
+IO (O_DIRECT), so it can be excepted from reported data read-in rate.<br>
+<br>
+</li>
+<li>Think over and implement the refinements to the balancing
+algorithm listed at the end of section REBALANCING ALGORITHM.<br>
+<br>
+</li>
+<li>Think over and integrate the support for Xen shared
+(deduplicated) pages and handling of copy-on-write for shared pages.<br>
+Shared page support is currently disabled in Xen, but one day it may be
+(re)enabled.<br>
+<br>
+</li>
+<li>Integrate the support for Transcendent Memory pools.<br>
+<br>
+</li>
+<li>Implement <span style="font-style: italic;">membalancectl</span>
+commands to dynamically set (and display)&nbsp;Membalance settings for a
+domain. Currently the settings are read from a domain configuration
+file and cannot be changed through the lifetime of a domain. Suggested
+addition would allow to keep the values in&nbsp;Xenstore, subject
+to
+dynamic modifications, including the values quota/shares, whether
+automatic memory allocation adjustment is allowed for a domain, and any
+other&nbsp;Membalance domain-specific settings etc. This command would also
+allow to start managing a previously unmanaged domain without having to
+restart it.<br>
+<br>
+</li>
+<li>Think over an impact of in-guest hotplug memory support.<br>
+<br>
+</li>
+<li>(Low priority:) Think over and integrate the support for
+paged pages.<br>
+<br>
+</li>
+<li>Consider the merits of&nbsp;hierarchical resource
+allocation, similar to Linux cgroups.<br>
+<br>
+</li>
+<li>Design and provide a support for a version of <span style="font-style: italic;">memprobe </span>protocol
+that would explicitly instruct&nbsp;Membalance about current and projected
+memory needs of the virtual machine. Such a probe can be useful for VMs
+that are dedicated to running a principal application such as a
+database engine, and where such an application is in a position to make
+better reasoning about its memory needs than application-agnostic
+probes. This may possibly <br>
+result in more than one probe running inside a VM, and a need to
+coalesce data from a set of probes inside a single VM.<br>
+<br>
+</li>
+<li>Make policy module pluggable. Reimplement it in a somewhat
+higher-level language (such as Java or OCaml/Haskell), so it can be
+used as a template for a development of custom policy modules.<br>
+<br>
+</li>
+<li>Develop regular documentation, man packages, and
+distro-specific installation packages.</li>
+</ul>
+<br>
+<hr>
+<a name="REFERENCES"></a><br>
+<div style="text-align: center;"><span style="font-weight: bold;">REFERENCES</span><br>
+</div>
+<br>
+Carl Waldspurger, <a href="https://www.usenix.org/events/osdi02/tech/waldspurger/waldspurger.pdf">&#8220;Memory
+Resource Management in VMware ESX server&#8221;</a><br>
+<br>
+<div style="margin-left: 40px;">Discusses
+page reclamation issues, ballooning, host-based paging, content-based
+page sharing/deduplication, share-based resource management, and a
+composite resource management formula accounting both for shares and
+for memory pressure or &#8220;resource under-use tax&#8221;.
+The use factor in ESX is assessed based on page reference sampling
+(every sampling interval some number of pages are marked inaccessible
+by the hypervisor which then monitors for the percentage of those pages
+being hit by the guest).<br>
+</div>
+<br>
+Transcendent memory:<br>
+<br>
+<div style="margin-left: 40px;">Main project page: <a href="https://oss.oracle.com/projects/tmem">https://oss.oracle.com/projects/tmem</a><br>
+Dan Mangenheimer et al., <a href="https://oss.oracle.com/projects/tmem/dist/documentation/papers/tmemLS09.pdf">&#8220;Transcendent
+Memory and Linux&#8221;</a><br>
+Dan Mangenheimer ,&nbsp;<a href="https://oss.oracle.com/projects/tmem/dist/documentation/presentations/MemMgmtVirtEnv-LPC2010-Final.pdf">&#8220;Advances
+in memory management in a virtual environment&#8221;</a></div>
+<br>
+Jui-Hao Chiang, <a href="https://www.usenix.org/conference/icac13/technical-sessions/presentation/chiang">&#8220;Working
+Set-based Physical Memory Ballooning&#8221;</a><br>
+Jui-Hao Chiang, <a href="http://www.ecsl.cs.sunysb.edu/tr/TR253_thesis.pdf">&#8220;Optimization
+Techniques for Memory Virtualization-based Resource Management&#8221;</a><br>
+<br>
+<div style="margin-left: 40px;">Describes
+the scheme for dynamically tracking &#8220;true working set&#8221; of the domain by
+monitoring its swapin/refault rate. Dynamically expands the domain on
+increasing the rate, or starts to squeeze it when paging rate drops
+down, then stops squeezing it and bounces off as an increase in the
+paging rate is detected again. This way the size of the domain is hoped
+to approximate its TWS.<br>
+<br>
+Scheme description does not (?) account for VFS cache re-read rate, but
+this is easily amendable.<br>
+<br>
+More
+importantly, the scheme does not attempt to correlate intra-domain
+memory pressure with pressure in other domains, in making the sizing
+decisions.<br>
+<br>
+Also it is geared towards using short time horizon
+during the squeeze, likely resulting in elimination of pages (such as
+e.g. cached file data) that are likely to be needed later, but beyond
+this time horizon. Proactive memory reclamation should take into the
+account the costs of memory vs. the cost of IO bandwidth, in the spirit
+of Gray&#8217;s &#8220;5-minute rule&#8221; (or rather its modern editions).</div>
+<br>
+Weiming Zhao, Zhenlin Wang, <a href="http://dl.acm.org/citation.cfm?id=1508297">&#8220;Dynamic
+Memory Balancing for Virtual Machines&#8221;</a><br>
+<br>
+<div style="margin-left: 40px;">Tries
+to determine &#8220;true working set&#8221; of the virtual machine by monitoring
+its page access LRU histogram. Pages that are accessed infrequently are
+not part of the TWS and can be reclaimed from the domain without a
+significant hit on the performance.<br>
+<br>
+While this scheme (overhead
+and intrusiveness issues aside) gives an insight in what part of
+currently allocated memory is used, it does not provide unambiguous and
+comparable data about memory expansion pressure in the domain to expand
+beyond its current size.<br>
+<br>
+Authors circumvent it by either
+monitoring OS indicators (without elaborating which, how and response
+logics), or by expanding LRU list to monitor VM references to
+page&nbsp;in storage devices &#8211; bound to be prohibitively expensive
+for
+large data set.<br>
+<br>
+The scheme (or its discussion anyway) also does
+not address time horizon and premature reclamation issue (vs. &#8220;5-minute
+rule&#8221;) mentioned earlier.</div>
+<br>
+Martin Schwidefsky et al. (IBM), <a href="https://www.kernel.org/doc/ols/2006/ols2006v2-pages-321-336.pdf">&#8220;Collaborative
+Memory Management in Hosted Linux Environments&#8221;</a><br>
+<br>
+Qmemman, Qubes OS memory manager (<a href="http://www.qubes-os.org/wiki/Qmemman">http://www.qubes-os.org/wiki/Qmemman</a>)<br>
+<br>
+KVM Memory Overcommitment Manager<br>
+<br>
+<div style="margin-left: 40px;"><a href="http://www.ovirt.org/MoM">http://www.ovirt.org/MoM</a><br>
+<a href="https://aglitke.wordpress.com/2011/03/03/automatic-memory-ballooning-with-mom">https://aglitke.wordpress.com/2011/03/03/automatic-memory-ballooning-with-mom</a><br>
+</div>
+<br>
+Parts
+of memory rebalancing algorithm currently in use by Membalance were
+inspired by OpenVMS working set management algorithms, see e.g. Ruth
+Goldenberg, &#8220;OpenVMS Alpha Internals and Data Structures: Memory
+Management&#8220;, HP Technologies, 2002<br>
+</body></html>
