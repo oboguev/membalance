@@ -46,11 +46,11 @@ systems and multiplexing physical resources between users and
 concurrent processes.<br>
 <br>
 Like any computing entity reflecting human
-activity (and some of automated activity as well), virtual machines
+activity (and some of the automated activity as well), virtual machines
 more often than not exhibit an uneven load
-pattern significantly varying over time. Production system are likely
+pattern significantly varying over the time. Production system are likely
 to exhibit load depending on time of the day, business cycles, schedule
-for generation of reports, unpredictable&nbsp; factors like
+for generation of reports, unpredictable&nbsp;factors like
 interactive
 and market customer behavior etc. Development and test/staging systems
 and standby/failover instances may exhibit even more uneven load
@@ -63,15 +63,17 @@ these fluctuating workload demands, including bursty&nbsp;and peak
 loads. This applies to reallocation of CPU cycles between the VMs,
 sharing of IO bandwidth and (possibly thinly provisioned) storage. A
 similar need also exists for dynamic reallocation of main memory
-between the VMs. Higher loads may require an increased amount of
-pseudo-physical memory available to a virtual machine. Insufficient
-memory is likely to result in increased paging rate and&nbsp;file
+between the VMs. Higher loads may require an increased amount
+of&nbsp;physical memory available to a virtual machine. Insufficient
+memory is likely to result in increased paging rate and&nbsp;increased
+file
 system cache miss rate, due to insufficient cache size, leading to
-lower performance and the waste of IO bandwidth to re-read pages and
+lower performance and the waste of IO bandwidth to re-read virtual
+memory pages and
 file data from storage devices. Therefore it normally pays off to
 increase
-memory size of a virtual machine that has significant <span style="font-style: italic;">memory pressure</span>, at
-the cost of shrinking other machines with low current demand for main
+physical memory allocation for a virtual machine that has significant <span style="font-style: italic;">memory pressure</span>, at
+the cost of shrinking other machines with lower current demand for main
 memory.<br>
 <br>
 Such
@@ -85,21 +87,20 @@ VMs within a hypervisor.<br>
 Broadly, there are two complementary approaches to dynamic partitioning
 of memory between the VMs.<br>
 <ul>
-<li>One is dynamically adjusting memory size of individual VMs,
+<li>Dynamically adjusting memory size of individual VMs,
 according to current memory demand of the VMs.<br>
 <br>
-This approach parallels dynamic adjustment of process working/resident
+This approach parallels dynamic adjustment of process&#8217; working/resident
 set in a traditional OS.<br>
 </li>
 </ul>
 <ul>
-<li>The other approach is using Transcendent Memory.<br>
+<li>Using Transcendent Memory.<br>
 <br>
-It
-allocates a region of hypervisor memory for VMs to use as an &#8220;extended
-memory&#8221; accessible only indirectly on a block basis (remember IBM PC,
+This approach allocates a region of hypervisor memory for VMs to use as an &#8220;extended
+memory&#8221; accessible to VMs only indirectly on a block basis (remember IBM PC,
 DOS and &#8220;extended memory&#8221; drivers?) and used as a shared area for page
-and file system caches. When a VM does not have sufficient main memory,
+and file system caches. When a VM does not have sufficient main memory for virtual memory or file system caches,
 it can use Transcendent Memory as an overflow area.<br>
 <br>
 There are two basic forms of Transcendent Memory: clean data pools and
@@ -109,11 +110,11 @@ In
 a traditional OS, a memory is (broadly) divided between per-process
 working sets (or sometimes single global working set in operating
 systems that do not have a notion of per-process working sets, like
-e.g. Linux), Modified Page List and Free Page List maintained in a
+e.g. Linux), Modified Page List and Free Page List, with the latter two maintained in a
 LRU-like order.<br>
 <br>
-When a page is evicted from a process working/resident set, it
-experiences the following transitions.<br>
+When a page is evicted from a process&#8217; working/resident set, it
+experiences the following transitions:<br>
 <br>
 An evicted page that has not been modified is put on the free list:
 &nbsp;</li>
@@ -125,14 +126,13 @@ An evicted page that has not been modified is put on the free list:
 Pages
 on the Free List are considered to be available for grabbing and reuse
 in case memory is needed, since their content can be reconstructed by
-reading it again from a backing store (such as a paging or image file).<br>
-On
+reading it again from a backing store (such as a paging or image file). On
 the other hand, if page on the Free List is referenced by a process
 that needs it, it can be refaulted into that process&#8217; working set, at
 which point the page is removed from the Free List.<br>
 <br>
 An evicted
-page that has been modified by a process is put on the modified list
+page that has been modified by a process is put on the Modified List
 first. If referenced by the process soon again, it can be re-faulted
 into that process&#8217; working set and removed from the Modified List. If a
 page on the Modified List stays&nbsp;unreferenced for some time
@@ -140,7 +140,7 @@ page on the Modified List stays&nbsp;unreferenced for some time
 thus not returned back to process working set) it may be flushed to a
 backing storage like a page file or original file (if originates from a
 memory-mapped file mapped as writable), at which point the page
-becomes&nbsp;&#8220;clean&#8221; and can be put on Free List:<br>
+becomes&nbsp;&#8220;clean&#8221; and can be moved to the Free List:<br>
 <br>
 </div>
 <div style="margin-left: 80px;">process working set
@@ -155,7 +155,7 @@ TMEM modified data pools represent an equivalent of Modified List.<br>
 <br>
 Guest
 operating systems are free to use TMEM pools for caching both virtual
-memory page and file cache pages, and in guest OS&#8217;es with integrated
+memory page and file cache pages. In guest OS&#8217;es with integrated
 VM/FS cache this happens more or less automatically.<br>
 <br>
 Very much
@@ -186,7 +186,7 @@ design parallels traditional OS memory split-up between process working
 sets, Modified Page List and Free Page List. </div>
 <br>
 Transcendent
-Memory is a viable technique of improving overall system performance.
+Memory is a viable technique for improving overall system performance.
 Beyond acting as a global cache aggregating pages from multiple VMs
 (clean-pool pages are retained and dropped in LRU-like fashion,
 optionally adjusted by per-VM <span style="font-style: italic;">share</span>
@@ -195,7 +195,7 @@ and thus providing more extra memory to those VMs that currently are in
 a heavier need of memory, it also offers less obvious modes
 of optimizations. Pages can be compressed and de-duplicated. Also TMEM
 is
-able to use the kinds of memory less suitable as regular main memory,
+potentially able to use the kinds of memory less suitable as regular main memory,
 for example memory blades built of&nbsp;slow cheap RAM (yet much
 faster
 than Flash memory) located in far NUMA nodes.<br>
@@ -205,16 +205,16 @@ dynamic adjustment of memory size of individual VMs.<br>
 <br>
 Indeed,
 if host system were to be configured to run undersized VMs (i.e.
-statically configured with memory size well below that VM peak memory
+VMs statically configured with memory size well below that VM peak memory
 utilization), and relying on TMEM pool to keep their &#8220;overflow pages&#8221;
 during the periods of elevated load, such a configuration would induce
 the following kinds of overhead:<br>
 <ul>
-<li>high rate for invocation intra-guest algorithm determining
-which page to evict</li>
-<li>copyout of evicted page to TMEM (hypercall + memcpy + list
+<li>high rate for invocation of intra-guest algorithms determining
+which pages to evict</li>
+<li>copyout of evicted pages to TMEM (hypercall + memcpy + list
 management)</li>
-<li>copyin of cached&nbsp; page from TMEM (hypercall + list
+<li>copyin of cached&nbsp; pages from TMEM (hypercall + list
 management + memcpy)</li>
 <li>updates to virtual memory structures if the page represents
 an address space page (rather than FS cache page)</li>
@@ -226,7 +226,7 @@ pages (to move them to the clean list, in the conditions of intra-guest
 main memory shortage)</li>
 <li>if TMEM does&nbsp;define preswap pool,
 then this raises an issue about its handling mentioned earlier (lack of
-guest notification)</li>
+guest notification when preswap pool must be shrunk)</li>
 <li>if
 domain experiences high need in mapped virtual memory (as opposed to FS
 cache), TMEM is not the most satisfactory solution since the access to
@@ -253,7 +253,7 @@ Whereas Transcendent Memory would:<br>
 <br>
 </li>
 <li>Dampen the errors in&nbsp;prediction/estimates of
-memory needs of individual VMs compared to their actual needs<br>
+memory needs of individual VMs compared to their actual needs.<br>
 </li>
 </ol>
 <div style="margin-left: 40px;">This is crucial, as
@@ -265,18 +265,18 @@ prediction of its change over forecasted time interval have only
 limited predictive capacity, so mis-predictions are a given.<br>
 <br>
 Without
-Transient Memory, if a domain size is mis-predicated on
-lower-than-actual size, evicted page is totally lost and would have to
+Transient Memory, if a domain size is mis-predicted on
+lower-than-actual side, evicted pages are totally lost and would have to
 be re-read.<br>
 <br>
-True, the amount allocated to Transient Memory pools
-can be divided on some basis among individual VMs and thus buttress the
-available memory in the domain. However misprediction means that in
-some domains this extra memory will be under-utilized, meaning in turn
-that needy domains will effectively receive less memory compared to a
-globally pooled configuration. If a memory pool is split among domains,
-the efficiency of its use is vulnerable to split ration misprediction.
-It it is held as a whole, with pool pages used on actual LRU-like
+True, it it possible to get by without TMEM pools and instead to divide memory otherwise allocated to Transient Memory pools
+among individual VMs (on some predicted ratio basis) and thus buttress the
+available memory in the domains. However misprediction means that in
+some of the domains this extra memory will be under-utilized, meaning in turn
+that other, more needy domains will effectively receive less memory compared to available for them in a
+globally pooled configuration. If a memory pool is liquidated and its memory is split among the domains,
+the efficiency of this memory use is vulnerable to split ratio misprediction.
+On the contrary, when it is held as a globally used single whole, with pooled pages used on actual global LRU-like
 basis, the need to predict and the impact of misprediction is
 eliminated.<br>
 </div>
@@ -291,7 +291,7 @@ of initial version of Membalance (0.1, implemented so far) is to: <br>
 <li>Create
 a harness that hosts the rebalancing algorithm and provides it with
 runtime facilities to monitor hosted domains, manage their properties,
-resize them, respond to sysadmin management interface etc.<br>
+dynamically resize them, respond to sysadmin management interface etc.<br>
 <br>
 </li>
 <li>Provide an initial version of rebalancing
@@ -321,7 +321,7 @@ than an application-agnostic probe monitoring the whole VM without the
 knowledge and understanding of application internals. </li>
 </ul>
 The
-initial version of Membalance uses the first approach, but later may
+initial version of Membalance uses the former approach, but later may
 explore the second option as well and provide an interface for the
 latter option (in practice, this would require to combine data from
 application-specific probes with data reported by application-agnostic
@@ -330,7 +330,7 @@ cannot easily account for).<br>
 <br>
 There
 is a number of approaches a
-balancer can measure memory pressure inside a domain. (See section
+balancer can use to measure memory pressure inside a domain. (See section
 REFERENCES below.) For example, VMware ESX estimates VM&#8217;s memory usage
 intensity by sampling page reference frequency. Every sampling interval
 a certain
@@ -345,15 +345,15 @@ sampling of this kind helps to assess the activity within the VM&#8217;s
 active working set (interpreted by ESX to infer the estimate of idle
 memory percentage and impose &#8220;idle memory tax&#8221;), it does not provide a
 reliable and reliably
-comparable indicator of expansion pressure.<br>
+comparable indicator of domain expansion pressure.<br>
 <br>
 Membalance
 therefore opts to rely on OS-specific probes. Each VM subject to being
-dynamically resized by Membalance runs a probe that collects memory
+managed (dynamically resized) by Membalance runs a probe that collects memory
 pressure data based on OS-specific indicators and reports this data to
 Membalance controller (daemon) running in Dom0. The controller relies
-on reported memory pressure data (comparison of reported memory
-pressure within the managed domains) plus policy settings to make a
+on reported memory pressure data (e.g. readings of reported memory
+pressure within all the managed domains) plus policy settings to make a
 reasoning about the desired change in&nbsp;allocation of host
 memory
 between the domains.<br>
@@ -368,9 +368,9 @@ terminate
 the execution of the probe. If Membalance does not receive probes
 reading, at first it temporarily stops managing memory allocation of
 this domain, except for the situations of significant memory need by
-the host, in which case the domain can be shrunk. If domain has not
-reported memory pressure data for some time, established by one of
-Memprobe policy settings, and the domain is sized above its quota, it
+the host, in which case the domain can be shrunk to meet these needs. Furthermore, if a domain has not
+reported memory pressure data for some time (established by one of
+Memprobe policy settings), and the domain is sized above its quota, it
 is shrunk down to its quota.<br>
 <br>
 An in-guest actor with guest-level
@@ -392,10 +392,10 @@ also include reads from Transcendent Memory pools.) Most operating
 systems do not expose this kind of statistics in their stock
 uninstrumented kernels, however they usually do expose a close proxy:<br>
 <ul>
-<li>aggregate hard page fault rate + block read rate into file
+<li>aggregate hard page fault rate + block read rate into the file
 system cache<br><br>
 </li>
-<li>taken under additional filter requirement that a percentage
+<li>monitored by Membalance under an additional filter requirement that a percentage
 of free memory inside guest must be low</li>
 <ul>
 <li>as there is no point expanding guest that has substantial
@@ -405,17 +405,15 @@ even high IO and paging rates do not indicate high memory pressure</li>
 </ul>
 </ul>
 This is the construction of OS-level indicator that Membalance probe
-currently reports. <br>
-When percentage of free memory inside guest is below a threshold,
+currently reports. <br><ul><li>
+When percentage of free memory inside a guest is below a threshold,
 Membalance probe reports aggregate hard page fault rate + block IO rate
-into file system cache.<br>
-When percentage of free memory inside guest is above a threshold,
-reported rate is 0.<br>
-<br>
+into file system cache.</li></ul><ul><li>
+When percentage of free memory inside a guest is above a threshold,
+reported rate is 0.</li></ul>
 Note that the described indicator very much parallels the traditional
 indicator of
-process paging rate within a conventional OS, with the following
-translations:<br>
+process paging rate within a conventional OS, with the following correspondences:<br>
 <br>
 <center>
 <table style="text-align: left;" border="0" cellpadding="2" cellspacing="2">
@@ -444,7 +442,7 @@ and with aggregate block/page IO statistics at VM/Hypervisor boundary
 taking the role of page fault statistics at process/OS boundary.<br>
 <br>There is a situation however, in which this simple indicator may be
 thrown off significantly and yield false reading of high memory
-pressure. If a VM performs the scan of large data set (e.g. full-disk
+pressure. If a VM performs the scan of a large data set (e.g. full-disk
 search) using cached IO primitives, i.e. accessing data that it does
 not really want or intend to cache, but indicating caching intent
 through the use of cached IO access, the probe will likely observe very high
@@ -455,7 +453,7 @@ in low guest free memory. This will create a combination of the
 conditions that will cause the indicator to falsely report high memory
 pressure within a domain. A proper way to address this situation is to
 avoid it in the first place by application using O_DIRECT and/or
-posix_fadvise(POSIX_FADV_DONTNEED) on Linux and
+posix_fadvise(POSIX_FADV_DONTNEED) on Linux or
 FILE_FLAG_NO_BUFFERING&nbsp;on Windows. Still it may be possible that a
 VM is processing a data set with a stock application developed without
 handling large data sets in mind, e.g. running <span style="font-style: italic;">grep</span>
